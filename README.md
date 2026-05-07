@@ -45,11 +45,10 @@ Configuration (dataset path, HF repo, augmentation parameters) is set in `augmen
 `training/orchestrate.py` is a fully automated pipeline that:
 
 1. Provisions a Brev `g5.xlarge` instance (NVIDIA A10G, 24 GB VRAM, 125 GB SSD)
-2. Uploads your Hugging Face credentials securely to the instance
-3. Installs miniforge, creates a Python 3.12 environment, and installs LeRobot with SmolVLA dependencies — all non-interactively
-4. Runs `lerobot-train` to fine-tune [`lerobot/smolvla_base`](https://huggingface.co/lerobot/smolvla_base) on your dataset
-5. Uploads the resulting checkpoint to your Hugging Face Hub model repo
-6. Deletes the Brev instance automatically (stopping all billing), whether training succeeds or fails
+2. Writes your credentials securely to the instance via SSH (no `brev copy`/SCP)
+3. Installs miniforge, creates a Python 3.12 environment, and installs LeRobot with SmolVLA, dataset, wandb, and PyAV dependencies — all non-interactively
+4. Runs `lerobot-train` to fine-tune [`lerobot/smolvla_base`](https://huggingface.co/lerobot/smolvla_base) on your dataset, and pushes the checkpoint directly to your HF Hub model repo
+5. Deletes the Brev instance automatically (stopping all billing), whether training succeeds or fails
 
 > **Note:** `remote_train.sh` is executed remotely by `orchestrate.py`. You never need to run it directly.
 
@@ -113,23 +112,26 @@ python training/orchestrate.py \
 
 ```
 [local]   brev create smolvla-training --type g5.xlarge
-[local]   poll brev ls --json until RUNNING
-[local]   brev copy credentials → instance:/tmp/.lerobot_env
-[local]   brev exec @training/remote_train.sh  ← blocks here
-  [remote]  install miniforge (silent)
-  [remote]  conda create -n lerobot python=3.12
-  [remote]  conda install ffmpeg
-  [remote]  pip install lerobot[smolvla]
-  [remote]  huggingface-cli login --token $HF_TOKEN
-  [remote]  lerobot-train --policy.path=lerobot/smolvla_base ...
-  [remote]  upload checkpoint → HF Hub
+[local]   poll brev ls --json until RUNNING  (+30 s SSH grace period)
+[local]   brev refresh  (update SSH alias to current hostname)
+[local]   ssh smolvla-training 'bash -s' < preamble.sh  ← writes /tmp/.lerobot_env
+[local]   ssh smolvla-training 'bash -s' < remote_train.sh  ← blocks here (~hours)
+  [remote]  curl miniforge installer + bash install
+  [remote]  conda create -n lerobot python=3.12 pip
+  [remote]  pip install lerobot[smolvla,dataset] wandb av
+  [remote]  hf auth login --token $HF_TOKEN
+  [remote]  wandb login (up to 5 retries for network readiness)
+  [remote]  lerobot-train --policy.type=smolvla
+                          --policy.pretrained_path=lerobot/smolvla_base
+                          --dataset.video_backend=pyav
+                          --policy.push_to_hub=true ...
   [remote]  rm /tmp/.lerobot_env
 [local]   brev delete smolvla-training
 ```
 
 ### Using Weights & Biases
 
-Pass both flags together. The API key is written to the credentials file on the instance — WandB picks it up automatically via `WANDB_API_KEY` without any interactive login:
+Pass both flags together:
 
 ```bash
 python training/orchestrate.py \
@@ -140,6 +142,8 @@ python training/orchestrate.py \
 ```
 
 Find your API key at <https://wandb.ai/settings>. The script will exit with an error if `--wandb-enable` is set but no key is provided.
+
+The remote script runs `wandb login` with up to 5 retries (20 s apart) before training starts, because Brev instances sometimes take a minute to reach `api.wandb.ai` after boot. `WANDB_INIT_TIMEOUT` and `WANDB_HTTP_TIMEOUT` are also increased to tolerate slow cold-start networks.
 
 ### Error handling
 
