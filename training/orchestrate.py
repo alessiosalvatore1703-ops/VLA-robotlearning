@@ -139,6 +139,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable Weights & Biases experiment tracking on the remote instance.",
     )
+    p.add_argument(
+        "--wandb-api-key",
+        default=os.environ.get("WANDB_API_KEY"),
+        help="Weights & Biases API key. Defaults to $WANDB_API_KEY. Required when --wandb-enable is set.",
+    )
     return p.parse_args()
 
 
@@ -149,6 +154,13 @@ def main() -> None:
         sys.exit(
             "Error: a Hugging Face token is required.\n"
             "Pass --hf-token TOKEN or set the HF_TOKEN environment variable."
+        )
+
+    if args.wandb_enable and not args.wandb_api_key:
+        sys.exit(
+            "Error: --wandb-enable requires a Weights & Biases API key.\n"
+            "Pass --wandb-api-key KEY or set the WANDB_API_KEY environment variable.\n"
+            "Find your key at https://wandb.ai/settings"
         )
 
     instance_name = args.instance_name
@@ -167,6 +179,8 @@ def main() -> None:
             f.write(f'export TRAIN_STEPS="{args.train_steps}"\n')
             f.write(f'export BATCH_SIZE="{args.batch_size}"\n')
             f.write(f'export WANDB_ENABLE="{"true" if args.wandb_enable else "false"}"\n')
+            if args.wandb_api_key:
+                f.write(f'export WANDB_API_KEY="{args.wandb_api_key}"\n')
 
         # ── 1. Provision instance ─────────────────────────────────────────
         print(f"\n=== Provisioning Brev instance '{instance_name}' (type: {INSTANCE_TYPE}) ===")

@@ -90,6 +90,7 @@ This will take approximately **4 hours** for the default 20 000 steps on an A10G
 | `--batch-size` | `64` | Training batch size — reduce to `32` if you hit OOM |
 | `--instance-name` | `smolvla-training` | Name of the Brev instance |
 | `--wandb-enable` | off | Pass this flag to enable Weights & Biases logging |
+| `--wandb-api-key` | `$WANDB_API_KEY` | WandB API key — required when `--wandb-enable` is set. Get it at [wandb.ai/settings](https://wandb.ai/settings) |
 
 ### Example with all options
 
@@ -120,6 +121,20 @@ python training/orchestrate.py \
   [remote]  rm /tmp/.lerobot_env
 [local]   brev delete smolvla-training
 ```
+
+### Using Weights & Biases
+
+Pass both flags together. The API key is written to the credentials file on the instance — WandB picks it up automatically via `WANDB_API_KEY` without any interactive login:
+
+```bash
+python training/orchestrate.py \
+    --dataset-repo-id USERNAME/my-dataset \
+    --output-repo-id  USERNAME/my-smolvla \
+    --wandb-enable \
+    --wandb-api-key   YOUR_WANDB_API_KEY   # or export WANDB_API_KEY=... beforehand
+```
+
+Find your API key at <https://wandb.ai/settings>. The script will exit with an error if `--wandb-enable` is set but no key is provided.
 
 ### Error handling
 
