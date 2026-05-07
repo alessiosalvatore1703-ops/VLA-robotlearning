@@ -23,7 +23,10 @@ The augmentation pipeline takes a LeRobot-format dataset, applies text and visua
 
 ### Install dependencies
 
+It is recommended to use a virtual environment:
+
 ```bash
+python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -51,6 +54,8 @@ Configuration (dataset path, HF repo, augmentation parameters) is set in `augmen
 > **Note:** `remote_train.sh` is executed remotely by `orchestrate.py`. You never need to run it directly.
 
 ### Prerequisites
+
+**No local virtual environment needed** — `orchestrate.py` uses only Python standard library modules. The remote instance sets up its own isolated conda environment from scratch.
 
 **Brev CLI** — install and authenticate once:
 
