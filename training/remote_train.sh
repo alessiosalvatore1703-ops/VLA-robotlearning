@@ -24,79 +24,107 @@ echo "============================================================"
 echo ""
 
 # ── 2. Install miniforge silently ─────────────────────────────────────────────
-echo "==> [1/6] Installing miniforge (Python environment manager)..."
+echo "==> [1/5] Installing miniforge (Python environment manager)..."
 MINIFORGE_INSTALLER="/tmp/miniforge_install.sh"
-wget -q \
+# -fsSL: -f exits non-zero on HTTP errors, -s silent, -S show errors, -L follow redirects.
+curl -fsSL \
   "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh" \
-  -O "$MINIFORGE_INSTALLER"
+  -o "$MINIFORGE_INSTALLER"
 bash "$MINIFORGE_INSTALLER" -b -p "$HOME/miniforge3"
 rm "$MINIFORGE_INSTALLER"
 
-# Activate conda for this non-interactive shell session
-eval "$("$HOME/miniforge3/bin/conda" shell.bash hook)"
-conda config --set always_yes true   # skip all "Proceed ([y]/n)?" prompts
+CONDA="$HOME/miniforge3/bin/conda"
 
 # ── 3. Create isolated Python 3.12 environment ────────────────────────────────
-echo "==> [2/6] Creating 'lerobot' conda environment (Python 3.12)..."
-conda create -n lerobot python=3.12
-conda activate lerobot
+# Include `pip` explicitly: with the conda-forge channel used by miniforge,
+# `python=3.12` alone does not always pull pip as a default dependency.
+# Use -y instead of `always_yes` config to avoid edge cases on a fresh install.
+echo "==> [2/5] Creating 'lerobot' conda environment (Python 3.12 + pip)..."
+"$CONDA" create -y -n lerobot python=3.12 pip
 
-# ffmpeg is required by TorchCodec for LeRobot video decoding
-conda install ffmpeg -c conda-forge
+
+# Use explicit paths so this works in non-interactive shells where
+# `conda activate` silently fails to switch the active Python.
+ENV_BIN="$HOME/miniforge3/envs/lerobot/bin"
+PIP="$ENV_BIN/pip"
+PYTHON="$ENV_BIN/python"
+
+# Fail loudly if conda silently created the env without pip / python.
+if [ ! -x "$PIP" ] || [ ! -x "$PYTHON" ]; then
+    echo "ERROR: lerobot conda env is missing python or pip."
+    echo "  expected:  $PIP  +  $PYTHON"
+    ls -la "$ENV_BIN" 2>&1 || true
+    exit 1
+fi
 
 # ── 4. Install LeRobot + SmolVLA VLA dependencies ─────────────────────────────
-echo "==> [3/6] Installing LeRobot with SmolVLA extras..."
+echo "==> [3/5] Installing LeRobot with SmolVLA extras..."
+rm -rf "$LEROBOT_DIR"
 git clone --depth=1 https://github.com/huggingface/lerobot.git "$LEROBOT_DIR"
 cd "$LEROBOT_DIR"
-# [smolvla] installs the vision-language-action model dependencies
-pip install --quiet -e ".[smolvla]"
+# [smolvla] — VLA model deps; [dataset] — adds the `datasets` package required at import time
+"$PIP" install --quiet -e ".[smolvla,dataset]"
+# wandb is not bundled in any lerobot extra
+"$PIP" install --quiet wandb
+# av (PyAV) is the video backend we use; torchcodec is incompatible with PyTorch 2.10+cu128
+"$PIP" install --quiet av
 
 # ── 5. Authenticate with Hugging Face (non-interactive) ───────────────────────
-echo "==> [4/6] Authenticating with Hugging Face Hub..."
-huggingface-cli login --token "$HF_TOKEN"
+# `huggingface-cli` was deprecated; the new CLI is `hf` (same package).
+echo "==> [4/5] Authenticating with Hugging Face Hub..."
+"$ENV_BIN/hf" auth login --token "$HF_TOKEN" --add-to-git-credential
+
+# ── 5b. Configure Weights & Biases for unstable networks ──────────────────────
+# Brev instances occasionally show transient timeouts to api.wandb.ai during
+# the first minutes after boot.  We:
+#   (a) bump init / HTTP timeouts so a slow first request doesn't kill the run,
+#   (b) log in explicitly so auth + DNS fail fast (before training starts),
+#   (c) enable resume mode so a network blip mid-run doesn't tank training.
+if [ "$WANDB_ENABLE" = "true" ]; then
+  export WANDB_INIT_TIMEOUT=600       # default ~30s — too short on cold instances
+  export WANDB_HTTP_TIMEOUT=120       # default ~10s
+  export WANDB_RESUME=allow           # keep training even if the run reconnects
+  export WANDB_DISABLE_SERVICE=true   # avoid wandb-service hangs on some hosts
+
+  echo "==> [4b/5] Logging into Weights & Biases (verifies network + key)..."
+  # Retry the login a few times — DNS / network sometimes isn't ready yet.
+  wandb_ok=false
+  for attempt in 1 2 3 4 5; do
+    if "$ENV_BIN/wandb" login --relogin "$WANDB_API_KEY"; then
+      wandb_ok=true
+      break
+    fi
+    echo "  wandb login attempt $attempt failed; retrying in 20s..."
+    sleep 20
+  done
+  if [ "$wandb_ok" = false ]; then
+    echo "ERROR: wandb login failed after 5 attempts. Aborting to avoid wasting GPU time."
+    exit 1
+  fi
+fi
 
 # ── 6. Fine-tune SmolVLA ──────────────────────────────────────────────────────
-echo "==> [5/6] Starting fine-tuning on $DATASET_REPO_ID..."
-mkdir -p "$OUTPUT_DIR"
+echo "==> [5/5] Starting fine-tuning on $DATASET_REPO_ID..."
+rm -rf "$OUTPUT_DIR"   # lerobot-train raises FileExistsError if the dir exists, even when empty
 
 cd "$LEROBOT_DIR"
-lerobot-train \
-  --policy.path=lerobot/smolvla_base \
+"$ENV_BIN/lerobot-train" \
+  --policy.type=smolvla \
+  --policy.pretrained_path=lerobot/smolvla_base \
   --dataset.repo_id="$DATASET_REPO_ID" \
+  --dataset.video_backend=pyav \
   --batch_size="$BATCH_SIZE" \
   --steps="$TRAIN_STEPS" \
   --output_dir="$OUTPUT_DIR" \
+  --policy.push_to_hub=true \
+  --policy.repo_id="$OUTPUT_REPO_ID" \
   --job_name=smolvla_finetuning \
   --policy.device=cuda \
   --wandb.enable="$WANDB_ENABLE"
 
-echo "==> Fine-tuning complete."
+echo "==> Fine-tuning and upload complete."
 
-# ── 7. Upload checkpoint to Hugging Face Hub ──────────────────────────────────
-echo "==> [6/6] Uploading checkpoint to ${OUTPUT_REPO_ID}..."
-
-# Use Python for the upload so we get reliable repo creation + folder upload.
-# <<'PYEOF' (quoted) prevents bash from expanding $variables inside the heredoc;
-# the Python code reads everything it needs from the environment instead.
-python3 - <<'PYEOF'
-import os
-from huggingface_hub import HfApi
-
-output_dir  = os.environ["OUTPUT_DIR"]
-output_repo = os.environ["OUTPUT_REPO_ID"]
-token       = os.environ["HF_TOKEN"]
-
-api = HfApi(token=token)
-api.create_repo(output_repo, repo_type="model", exist_ok=True)
-api.upload_folder(
-    folder_path=output_dir,
-    repo_id=output_repo,
-    repo_type="model",
-)
-print(f"Checkpoint available at: https://huggingface.co/{output_repo}")
-PYEOF
-
-# ── 8. Remove credentials from the instance ───────────────────────────────────
+# ── 7. Remove credentials from the instance ───────────────────────────────────
 rm -f /tmp/.lerobot_env
 echo ""
 echo "==> All done. Credentials removed from instance."
