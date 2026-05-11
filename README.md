@@ -7,17 +7,80 @@ Vision-language-action (VLA) training pipeline for a pick-and-place task using t
 ## Repository structure
 
 ```
-augmentation/       Local data augmentation pipeline (LeRobot format)
+augmentation/         Local data augmentation pipeline (LeRobot format)
+datasets/
+  utils/
+    check_datasets_uniform.py  Verify that multiple datasets share the same format
+    downsample_fps.py          Downsample a dataset to a lower FPS
+    to_av1.py                  Re-encode video streams from H.264 to AV1
+    retask.py                  Replace the task prompt of a single-task dataset
+    merge_datasets.py          Merge multiple datasets into one
 training/
-  orchestrate.py    Local script — provisions Brev instance, drives the pipeline
-  remote_train.sh   Remote script — runs on the GPU instance (do not run locally)
-run_augmentation.py Entry point for the augmentation pipeline
-requirements.txt    Local Python dependencies
+  orchestrate.py      Local script — provisions Brev instance, drives the pipeline
+  remote_train.sh     Remote script — runs on the GPU instance (do not run locally)
+run_augmentation.py   Entry point for the augmentation pipeline
+requirements.txt      Local Python dependencies
 ```
 
 ---
 
-## 1. Data augmentation
+## 1. Dataset utilities
+
+All scripts live in `datasets/utils/` and are run from the repo root. They all accept local paths or Hugging Face repo IDs as input/output.
+
+### check_datasets_uniform.py — verify format compatibility
+
+```bash
+python datasets/utils/check_datasets_uniform.py user/ds1 user/ds2
+```
+
+Compares fps, robot_type, feature keys/dtypes/shapes, and video codec across all listed datasets. Exits 0 if all fields match, 1 otherwise.
+
+### downsample_fps.py — reduce frame rate
+
+```bash
+python datasets/utils/downsample_fps.py \
+    --input  user/my_dataset \
+    --output my_dataset_10fps \
+    --fps    10
+```
+
+Supports LeRobot v2.x and v3.x. Re-encodes videos and rewrites parquet indices.
+
+### to_av1.py — re-encode videos to AV1
+
+```bash
+python datasets/utils/to_av1.py \
+    --input  user/my_dataset \
+    --output my_dataset_av1
+```
+
+Uses SVT-AV1 via ffmpeg. Optional `--crf` (default 30) and `--preset` (default 8, range 0–13).
+
+### retask.py — replace the task prompt
+
+```bash
+python datasets/utils/retask.py \
+    --input  user/my_dataset \
+    --output my_dataset_retask \
+    --task   "Put the banana in the green bowl."
+```
+
+Works only on single-prompt datasets. Rewrites `tasks.parquet` and the `tasks` column in every episode parquet.
+
+### merge_datasets.py — merge multiple datasets
+
+```bash
+python datasets/utils/merge_datasets.py \
+    --inputs user/ds1 user/ds2 user/ds3 \
+    --output merged_dataset
+```
+
+Requires datasets to pass the uniformity check (fps, features, codec). Tasks do not need to match — each source's prompts are merged into a unified task list and `task_index` values are remapped automatically.
+
+---
+
+## 2. Data augmentation
 
 The augmentation pipeline takes a LeRobot-format dataset, applies text and visual augmentations, and pushes the expanded dataset to the Hugging Face Hub.
 
@@ -40,7 +103,7 @@ Configuration (dataset path, HF repo, augmentation parameters) is set in `augmen
 
 ---
 
-## 2. SmolVLA fine-tuning on Brev
+## 3. SmolVLA fine-tuning on Brev
 
 `training/orchestrate.py` is a fully automated pipeline that:
 
