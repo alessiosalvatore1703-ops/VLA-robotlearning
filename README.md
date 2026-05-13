@@ -24,6 +24,28 @@ requirements.txt      Local Python dependencies
 
 ---
 
+## VLM backbone study
+
+To evaluate whether a small VLM could act as a perception backbone for the robot (e.g. "locate object X and move near it"), we built a spatial-grounding benchmark: four celebrity cards are arranged in a 2×2 grid on a table, and the model must name the quadrant (`top_left`, `top_right`, `bottom_left`, `bottom_right`) containing a given person.
+
+**Models tested:** `SmolVLM-256M-Instruct` and `SmolVLM-500M-Instruct` (HuggingFaceTB).
+
+| Model | Accuracy (20 samples) | Observed behaviour |
+|---|---|---|
+| SmolVLM-256M | 25% | Almost always predicts `top_left` regardless of input |
+| SmolVLM-500M | 25% | Almost always predicts `top_right` regardless of input |
+
+Both models score at chance level (random = 25%) and show no celebrity understanding: they ignore the identity prompt entirely and default to a fixed positional bias. Neither is viable as a VLM backbone without substantial fine-tuning.
+
+The benchmark code lives in `benchmarks/celebrity_recognition/`. Run it with:
+
+```bash
+python run_benchmark.py --model smolvlm_256m --dataset benchmarks/celebrity_recognition/data/dataset.csv
+python run_benchmark.py --model smolvlm_500m --dataset benchmarks/celebrity_recognition/data/dataset.csv
+```
+
+---
+
 ## 1. Dataset utilities
 
 All scripts live in `datasets/utils/` and are run from the repo root. They all accept local paths or Hugging Face repo IDs as input/output.
