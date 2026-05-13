@@ -8,6 +8,8 @@ Vision-language-action (VLA) training pipeline for a pick-and-place task using t
 
 ```
 augmentation/         Local data augmentation pipeline (LeRobot format)
+benchmarks/
+  celebrity_recognition/  VLM spatial-grounding benchmark (see VLM backbone study)
 datasets/
   utils/
     check_datasets_uniform.py  Verify that multiple datasets share the same format
@@ -15,10 +17,14 @@ datasets/
     to_av1.py                  Re-encode video streams from H.264 to AV1
     retask.py                  Replace the task prompt of a single-task dataset
     merge_datasets.py          Merge multiple datasets into one
+lerobot-doctor/       Dataset quality diagnostics tool (vendored)
+tracelr/              Desktop episode viewer and annotation tool (own README)
 training/
   orchestrate.py      Local script — provisions Brev instance, drives the pipeline
   remote_train.sh     Remote script — runs on the GPU instance (do not run locally)
 run_augmentation.py   Entry point for the augmentation pipeline
+run_benchmark.py      Entry point for VLM benchmarks
+trim_and_push.py      Trim frozen-action frames from a Hub dataset and re-push
 requirements.txt      Local Python dependencies
 ```
 
@@ -99,6 +105,26 @@ python datasets/utils/merge_datasets.py \
 ```
 
 Requires datasets to pass the uniformity check (fps, features, codec). Tasks do not need to match — each source's prompts are merged into a unified task list and `task_index` values are remapped automatically.
+
+### trim_and_push.py — remove frozen-action frames
+
+```bash
+python trim_and_push.py --src user/my_dataset --dst user/my_dataset_clean
+```
+
+Trims leading and trailing frames where the robot arm is not yet moving (frozen actions) from every episode in a LeRobot v3 Hub dataset, then pushes the cleaned dataset to a new HF repo. Episodes shorter than 50 frames after trimming are left untouched. Videos are re-encoded with SVT-AV1.
+
+---
+
+## 1b. Dataset diagnostics — lerobot-doctor
+
+`lerobot-doctor/` is a vendored copy of the [lerobot-doctor](https://github.com/jashshah999/lerobot-doctor) tool. It catches common dataset quality issues: corrupted timestamps, dropped frames, frozen actions, clipped values, metadata inconsistencies, and video problems.
+
+```bash
+pip install lerobot-doctor          # or: pip install ./lerobot-doctor
+lerobot-doctor /path/to/dataset
+lerobot-doctor user/my_hf_dataset
+```
 
 ---
 

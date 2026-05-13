@@ -1,0 +1,7 @@
+smolvlm_256m:
+  model_id: HuggingFaceTB/SmolVLM-256M-Instruct
+  dtype: bfloat16
+
+smolvlm_500m:
+  model_id: HuggingFaceTB/SmolVLM-500M-Instruct
+  dtype: bfloat16

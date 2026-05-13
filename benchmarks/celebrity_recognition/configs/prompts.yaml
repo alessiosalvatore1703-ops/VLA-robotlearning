@@ -1,0 +1,11 @@
+# {celebrity} is replaced at runtime with the target celebrity name.
+default: >
+  Four celebrities are arranged in a 2x2 grid.
+  Top row: left and right. Bottom row: left and right.
+  Where is {celebrity}?
+  Answer with exactly one of: top_left, top_right, bottom_left, bottom_right.
+
+scene: >
+  You are helping a robot. There are four celebrity cards arranged in a 2x2 grid on a table.
+  The robot needs to move an object near {celebrity}.
+  Which position is {celebrity}? Answer with exactly one of: top_left, top_right, bottom_left, bottom_right.
