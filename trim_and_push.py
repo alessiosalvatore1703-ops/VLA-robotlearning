@@ -122,36 +122,39 @@ def build_trimmed_parquets(df, trim_map: dict[int, tuple[int, int]], out_dir: Pa
     return trimmed_df
 
 
-def build_episode_metadata(trimmed_df, orig_ep_meta, trim_map: dict, fps: float, out_dir: Path):
-    """Rebuild meta/episodes parquet with updated lengths, indices, timestamps, and stats."""
-    import pandas as pd
-    from collections import defaultdict
+def build_episode_metadata(trimmed_df, orig_ep_meta, trim_map: dict, fps: float, out_dir: Path,
+                           orig_ep_files_per_chunk: int = 300):
+    """Rebuild meta/episodes parquet with updated lengths, indices, timestamps, and stats.
 
-    # Track cumulative position within each video file so from/to timestamps are correct
-    vid_chunk_col = f"videos/{VIDEO_KEY}/chunk_index"
-    vid_file_col = f"videos/{VIDEO_KEY}/file_index"
+    Preserves the original chunk/file sharding (orig_ep_files_per_chunk rows per file).
+
+    Timestamp logic: datasets may have multiple augmented episodes sharing the same video
+    segment (identical original from/to timestamps).  We preserve the original video position
+    and shift only by the trimmed lead:
+        new_from_ts = orig_from_ts + lead / fps
+        new_to_ts   = new_from_ts  + (new_len - 1) / fps
+    """
+    import pandas as pd
+
     vid_from_col = f"videos/{VIDEO_KEY}/from_timestamp"
     vid_to_col = f"videos/{VIDEO_KEY}/to_timestamp"
-    file_pos: dict[tuple, float] = defaultdict(float)
 
     new_rows = []
     for _, orig_row in orig_ep_meta.iterrows():
         ep_id = int(orig_row["episode_index"])
         ep_data = trimmed_df[trimmed_df["episode_index"] == ep_id].reset_index(drop=True)
         new_len = len(ep_data)
+        lead, _ = trim_map[ep_id]
+
+        orig_from_ts = float(orig_row[vid_from_col])
 
         row = orig_row.copy()
         row["length"] = new_len
         row["dataset_from_index"] = int(ep_data["index"].iloc[0])
         row["dataset_to_index"] = int(ep_data["index"].iloc[-1]) + 1
-
-        # Accumulate timestamp within the video file (episodes are concatenated in one file)
-        fkey = (int(orig_row[vid_chunk_col]), int(orig_row[vid_file_col]))
-        new_from_ts = round(file_pos[fkey], 1)
-        new_to_ts = round(new_from_ts + (new_len - 1) / fps, 1)
-        file_pos[fkey] = new_to_ts + 1 / fps
-        row[vid_from_col] = new_from_ts
-        row[vid_to_col] = new_to_ts
+        # Preserve original video position, shifted by the trimmed lead
+        row[vid_from_col] = round(orig_from_ts + lead / fps, 1)
+        row[vid_to_col]   = round(orig_from_ts + lead / fps + (new_len - 1) / fps, 1)
 
         # Recompute stats for non-image features
         ep_stats = recompute_episode_stats(ep_data)
@@ -162,9 +165,15 @@ def build_episode_metadata(trimmed_df, orig_ep_meta, trim_map: dict, fps: float,
         new_rows.append(row)
 
     new_meta = pd.DataFrame(new_rows).reset_index(drop=True)
-    out_path = out_dir / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(pa.Table.from_pandas(new_meta, preserve_index=False), out_path)
+
+    # Write multiple files matching original sharding
+    out_ep_dir = out_dir / "meta" / "episodes" / "chunk-000"
+    out_ep_dir.mkdir(parents=True, exist_ok=True)
+    for file_idx, start in enumerate(range(0, len(new_meta), orig_ep_files_per_chunk)):
+        chunk = new_meta.iloc[start : start + orig_ep_files_per_chunk]
+        out_path = out_ep_dir / f"file-{file_idx:03d}.parquet"
+        pq.write_table(pa.Table.from_pandas(chunk, preserve_index=False), out_path)
+
     return new_meta
 
 
@@ -255,9 +264,10 @@ def main():
         info = json.load(f)
     fps = float(info["fps"])
 
-    orig_ep_meta = pq.read_table(
-        local_dir / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
-    ).to_pandas()
+    ep_meta_files = sorted((local_dir / "meta" / "episodes" / "chunk-000").glob("*.parquet"))
+    orig_ep_meta = pd.concat(
+        [pq.read_table(p).to_pandas() for p in ep_meta_files], ignore_index=True
+    )
 
     trim_map = {}
     total_trimmed = 0
@@ -281,11 +291,14 @@ def main():
     print(f"  Working directory: {work_dir}")
 
     trimmed_df = build_trimmed_parquets(df, trim_map, work_dir, fps=fps)
-    new_ep_meta = build_episode_metadata(trimmed_df, orig_ep_meta, trim_map, fps, work_dir)
+    rows_per_ep_file = max(len(pq.read_table(p).to_pandas()) for p in ep_meta_files)
+    new_ep_meta = build_episode_metadata(trimmed_df, orig_ep_meta, trim_map, fps, work_dir,
+                                         orig_ep_files_per_chunk=rows_per_ep_file)
 
     # Update info.json
     new_info = dict(info)
     new_info["total_frames"] = len(trimmed_df)
+    new_info["total_episodes"] = len(new_ep_meta)
     (work_dir / "meta").mkdir(parents=True, exist_ok=True)
     with open(work_dir / "meta" / "info.json", "w") as f:
         json.dump(new_info, f, indent=2)

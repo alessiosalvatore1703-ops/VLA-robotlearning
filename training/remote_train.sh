@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Remote execution script for SmolVLA fine-tuning.
-# Invoked by orchestrate.py via: brev exec <instance> @training/remote_train.sh
+# Remote execution script for SmolVLA fine-tuning on an H100 (80 GB VRAM).
+# Invoked by orchestrate.py via SSH exec.
 #
 # Expects /tmp/.lerobot_env to exist on the instance (uploaded by orchestrate.py)
 # with the following exports:
@@ -69,6 +69,36 @@ cd "$LEROBOT_DIR"
 # av (PyAV) is the video backend we use; torchcodec is incompatible with PyTorch 2.10+cu128
 "$PIP" install --quiet av
 
+# Patch get_safe_version: huggingface_hub>=1.0 made HfHubHTTPError.__init__ require
+# a keyword-only 'response' arg, so lerobot's bare RevisionNotFoundError(message) raise
+# crashes with TypeError.  Datasets we push have no v* tags anyway, so returning
+# "main" is the correct fallback.
+python3 -c "
+import pathlib
+p = pathlib.Path('src/lerobot/datasets/utils.py')
+src = p.read_text()
+if 'raise RevisionNotFoundError(' not in src:
+    print('Patch not needed (pattern not found)')
+else:
+    lines = src.splitlines(True)
+    out = []
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        if 'raise RevisionNotFoundError(' in ln:
+            ind = len(ln) - len(ln.lstrip())
+            out.append(' ' * ind + 'return \"main\"  # patched: hf_hub>=1.0 broke RevisionNotFoundError ctor\n')
+            depth = ln.count('(') - ln.count(')')
+            while depth > 0 and i + 1 < len(lines):
+                i += 1
+                depth += lines[i].count('(') - lines[i].count(')')
+        else:
+            out.append(ln)
+        i += 1
+    p.write_text(''.join(out))
+    print('Patched get_safe_version in', str(p))
+"
+
 # ── 5. Authenticate with Hugging Face (non-interactive) ───────────────────────
 # `huggingface-cli` was deprecated; the new CLI is `hf` (same package).
 echo "==> [4/5] Authenticating with Hugging Face Hub..."
@@ -108,18 +138,21 @@ echo "==> [5/5] Starting fine-tuning on $DATASET_REPO_ID..."
 rm -rf "$OUTPUT_DIR"   # lerobot-train raises FileExistsError if the dir exists, even when empty
 
 cd "$LEROBOT_DIR"
-"$ENV_BIN/lerobot-train" \
+HF_TOKEN="$HF_TOKEN" "$ENV_BIN/lerobot-train" \
   --policy.type=smolvla \
   --policy.pretrained_path=lerobot/smolvla_base \
   --dataset.repo_id="$DATASET_REPO_ID" \
+  --dataset.revision=main \
   --dataset.video_backend=pyav \
   --batch_size="$BATCH_SIZE" \
+  --grad_accumulation_steps=1 \
   --steps="$TRAIN_STEPS" \
   --output_dir="$OUTPUT_DIR" \
   --policy.push_to_hub=true \
   --policy.repo_id="$OUTPUT_REPO_ID" \
   --job_name=smolvla_finetuning \
   --policy.device=cuda \
+  --policy.use_amp=true \
   --wandb.enable="$WANDB_ENABLE"
 
 echo "==> Fine-tuning and upload complete."
