@@ -69,6 +69,24 @@ cd "$LEROBOT_DIR"
 # av (PyAV) is the video backend we use; torchcodec is incompatible with PyTorch 2.10+cu128
 "$PIP" install --quiet av
 
+# Patch: factory.py doesn't guard against None stats (image features have no stats)
+python3 -c "
+import pathlib
+p = pathlib.Path('src/lerobot/datasets/factory.py')
+src = p.read_text()
+old = 'dataset.meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)'
+if old not in src:
+    print('factory patch not needed')
+else:
+    for line in src.splitlines():
+        if old in line:
+            indent = ' ' * (len(line) - len(line.lstrip()))
+            break
+    new = f'if dataset.meta.stats is not None and dataset.meta.stats.get(key) is not None:\n{indent}    {old}'
+    p.write_text(src.replace(indent + old, indent + new))
+    print('Patched factory.py')
+"
+
 # Patch get_safe_version: huggingface_hub>=1.0 made HfHubHTTPError.__init__ require
 # a keyword-only 'response' arg, so lerobot's bare RevisionNotFoundError(message) raise
 # crashes with TypeError.  Datasets we push have no v* tags anyway, so returning
@@ -145,7 +163,6 @@ HF_TOKEN="$HF_TOKEN" "$ENV_BIN/lerobot-train" \
   --dataset.revision=main \
   --dataset.video_backend=pyav \
   --batch_size="$BATCH_SIZE" \
-  --grad_accumulation_steps=1 \
   --steps="$TRAIN_STEPS" \
   --output_dir="$OUTPUT_DIR" \
   --policy.push_to_hub=true \

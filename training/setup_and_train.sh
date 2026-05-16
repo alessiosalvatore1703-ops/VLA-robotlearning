@@ -9,13 +9,13 @@
 set -euo pipefail
 
 # ── CONFIG — fill these in before running ─────────────────────────────────────
-HF_TOKEN=""
-DATASET_REPO_ID="ETHrobotlearning/task2-colors"
-OUTPUT_REPO_ID="Alessio03/smolvla-colors"
+HF_TOKEN=""  # set your HuggingFace token here, or export HF_TOKEN before running
+DATASET_REPO_ID="ETHrobotlearning/colours-task2"
+OUTPUT_REPO_ID="Alessio03/smolvla-colors-task2"
 TRAIN_STEPS=20000
-BATCH_SIZE=512
-WANDB_ENABLE="false"      # set to "true" to enable W&B logging
-WANDB_API_KEY=""          # required when WANDB_ENABLE="true"
+BATCH_SIZE=8
+WANDB_ENABLE="true"      # set to "true" to enable W&B logging
+WANDB_API_KEY=""  # set your W&B API key here, or export WANDB_API_KEY before running
 # ──────────────────────────────────────────────────────────────────────────────
 
 if [ -z "$HF_TOKEN" ]; then
@@ -28,6 +28,7 @@ if [ "$WANDB_ENABLE" = "true" ] && [ -z "$WANDB_API_KEY" ]; then
 fi
 
 LEROBOT_DIR="$HOME/lerobot"
+DATASET_DIR="$HOME/datasets/$(basename "$DATASET_REPO_ID")"
 OUTPUT_DIR="$HOME/outputs/smolvla"
 
 echo ""
@@ -72,6 +73,24 @@ cd "$LEROBOT_DIR"
 "$PIP" install --quiet -e ".[smolvla,dataset]"
 "$PIP" install --quiet wandb av
 
+# Patch: factory.py doesn't guard against None stats (image features have no stats)
+python3 -c "
+import pathlib
+p = pathlib.Path('src/lerobot/datasets/factory.py')
+src = p.read_text()
+old = 'dataset.meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)'
+if old not in src:
+    print('factory patch not needed')
+else:
+    for line in src.splitlines():
+        if old in line:
+            indent = ' ' * (len(line) - len(line.lstrip()))
+            break
+    new = f'if dataset.meta.stats is not None and dataset.meta.stats.get(key) is not None:\n{indent}    {old}'
+    p.write_text(src.replace(indent + old, indent + new))
+    print('Patched factory.py')
+"
+
 # Patch: huggingface_hub>=1.0 broke RevisionNotFoundError ctor in lerobot
 python3 -c "
 import pathlib
@@ -100,7 +119,7 @@ else:
 "
 
 # ── 4. Authenticate with Hugging Face ─────────────────────────────────────────
-echo "==> [4/5] Authenticating with Hugging Face Hub..."
+echo "==> [4/6] Authenticating with Hugging Face Hub..."
 "$ENV_BIN/hf" auth login --token "$HF_TOKEN" --add-to-git-credential
 
 # ── 4b. Authenticate with W&B (optional) ──────────────────────────────────────
@@ -110,7 +129,7 @@ if [ "$WANDB_ENABLE" = "true" ]; then
   export WANDB_RESUME=allow
   export WANDB_DISABLE_SERVICE=true
 
-  echo "==> [4b/5] Logging into Weights & Biases..."
+  echo "==> [4b/6] Logging into Weights & Biases..."
   for attempt in 1 2 3 4 5; do
     if "$ENV_BIN/wandb" login --relogin "$WANDB_API_KEY"; then
       break
@@ -124,8 +143,13 @@ if [ "$WANDB_ENABLE" = "true" ]; then
   done
 fi
 
-# ── 5. Fine-tune SmolVLA ──────────────────────────────────────────────────────
-echo "==> [5/5] Starting fine-tuning..."
+# ── 5. Download dataset locally ───────────────────────────────────────────────
+echo "==> [5/6] Downloading dataset to local disk (avoids slow streaming during training)..."
+"$ENV_BIN/hf" download "$DATASET_REPO_ID" \
+  --repo-type dataset
+
+# ── 6. Fine-tune SmolVLA ──────────────────────────────────────────────────────
+echo "==> [6/6] Starting fine-tuning..."
 rm -rf "$OUTPUT_DIR"
 
 cd "$LEROBOT_DIR"
@@ -136,7 +160,6 @@ HF_TOKEN="$HF_TOKEN" "$ENV_BIN/lerobot-train" \
   --dataset.revision=main \
   --dataset.video_backend=pyav \
   --batch_size="$BATCH_SIZE" \
-  --grad_accumulation_steps=1 \
   --steps="$TRAIN_STEPS" \
   --output_dir="$OUTPUT_DIR" \
   --policy.push_to_hub=true \
