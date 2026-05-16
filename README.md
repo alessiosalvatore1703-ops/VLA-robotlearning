@@ -28,6 +28,7 @@ training/
 run_augmentation.py   Entry point for the augmentation pipeline
 run_benchmark.py      Entry point for VLM benchmarks
 trim_and_push.py      Trim frozen-action frames from a Hub dataset and re-push
+augment_brightness_push.py  Add brightness variants to a v3 Hub dataset and re-push
 requirements.txt      Local Python dependencies
 ```
 
@@ -133,6 +134,22 @@ python datasets/utils/relabel_relative_bowls_and_merge.py
 ```
 
 Defaults to the six `ETHrobotlearning/config*-...` datasets as input and `ETHrobotlearning/task2-relative` as output. It creates adjacent-reference prompts such as `Put the banana into the bowl on the right of the red bowl from the robot perspective`. Middle-bowl target episodes are duplicated so both valid prompt styles are present: `on the right of` the left neighbor and `on the left of` the right neighbor.
+
+### augment_brightness_push.py — partition-based brightness augmentation (v3 Hub datasets)
+
+```bash
+python augment_brightness_push.py \
+    --src user/my_dataset \
+    --dst user/my_dataset_bright \
+    --brightness-levels 0.5 0.6 0.7 0.8 0.9 1.0 1.1 1.2
+```
+
+Pulls a LeRobot v3 dataset from the Hub, splits the source episodes into N contiguous
+partitions (N = number of brightness levels), assigns each partition a single brightness
+multiplier, and produces one augmented copy per source episode at its assigned brightness.
+Output = originals + one augmented copy per episode (final size = 2 × source).
+Only the pixels change — actions, observation.state, timestamps, task_index and
+per-episode stats are copied through unchanged. Videos are re-encoded with SVT-AV1.
 
 ### trim_and_push.py — remove frozen-action frames
 

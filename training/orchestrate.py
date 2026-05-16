@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Local orchestrator: provisions a Brev A10G instance, runs SmolVLA fine-tuning
+Local orchestrator: provisions a Brev H100 instance, runs SmolVLA fine-tuning
 remotely, waits for the checkpoint to be pushed to HF Hub, then deletes the
 instance to stop billing — automatically, on success or failure.
 
@@ -14,7 +14,7 @@ Usage:
         --output-repo-id  USERNAME/my-smolvla \
         [--hf-token TOKEN]          # or set $HF_TOKEN
         [--train-steps 20000]
-        [--batch-size 64]
+        [--batch-size 128]
         [--instance-name smolvla-training]
         [--wandb-enable]
 
@@ -36,8 +36,8 @@ from pathlib import Path
 
 HERE = Path(__file__).parent.resolve()
 
-# g5.xlarge: 1x NVIDIA A10G (24 GB VRAM), 4 vCPU, 16 GB RAM, 125 GB SSD
-INSTANCE_TYPE = "g5.xlarge"
+# gpu-h100-sxm.1gpu-16vcpu-200gb: Nebius H100 SXM (80 GB VRAM), 16 vCPU, $3.54/hr, stoppable
+INSTANCE_TYPE = "gpu-h100-sxm.1gpu-16vcpu-200gb"
 
 CREATE_MAX_RETRIES = 3      # retries only if the instance never appears in brev ls
 CREATE_RETRY_DELAY_S = 30   # seconds before retrying a create that left no trace
@@ -221,7 +221,7 @@ def delete_instance(instance_name: str) -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="End-to-end SmolVLA fine-tuning pipeline on a Brev A10G instance.",
+        description="End-to-end SmolVLA fine-tuning pipeline on a Brev H100 instance.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
@@ -243,13 +243,13 @@ def parse_args() -> argparse.Namespace:
         "--train-steps",
         type=int,
         default=20000,
-        help="Number of fine-tuning gradient steps (~4 h on A10G at 20 k steps).",
+        help="Number of fine-tuning gradient steps (~1 h on H100 at 20 k steps with batch 128).",
     )
     p.add_argument(
         "--batch-size",
         type=int,
-        default=64,
-        help="Training batch size. Reduce if OOM.",
+        default=128,
+        help="Training batch size. H100 (80 GB) comfortably runs 128; reduce if OOM.",
     )
     p.add_argument(
         "--instance-name",
@@ -340,7 +340,7 @@ def main() -> None:
         preamble_path = None
 
         # ── 5. Execute remote training script (blocks until complete) ─────
-        # ~4 hours for 20 k steps on an A10G. Ensure a stable network
+        # ~1 hour for 20 k steps on an H100 at batch 128. Ensure a stable network
         # connection, or run orchestrate.py inside a local tmux session.
         # No retry here — restarting a multi-hour training run from scratch
         # on a transient disconnect is rarely what we want.
