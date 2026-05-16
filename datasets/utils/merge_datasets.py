@@ -376,6 +376,8 @@ def merge(sources: List[Path], dst: Path) -> None:
     new_info = dict(ref_info)
     new_info["total_episodes"] = ep_offset
     new_info["total_frames"]   = frame_offset
+    new_info["total_tasks"]    = len(global_tasks)
+    new_info["total_videos"]   = sum(out_vid_fi.values())
     new_info["total_chunks"]   = 1
     new_info["splits"]         = {"train": f"0:{ep_offset}"}
     with open(dst / "meta" / "info.json", "w") as f:

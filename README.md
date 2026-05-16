@@ -16,6 +16,9 @@ datasets/
     downsample_fps.py          Downsample a dataset to a lower FPS
     to_av1.py                  Re-encode video streams from H.264 to AV1
     retask.py                  Replace the task prompt of a single-task dataset
+    relabel_bowls_and_merge.py Convert ordinal bowl prompts to color prompts, then merge
+    color_prompts_to_negation.py Convert color bowl prompts to negation prompts
+    relabel_relative_bowls_and_merge.py Convert ordinal bowl prompts to relative left/right prompts
     merge_datasets.py          Merge multiple datasets into one
 lerobot-doctor/       Dataset quality diagnostics tool (vendored)
 tracelr/              Desktop episode viewer and annotation tool (own README)
@@ -105,6 +108,31 @@ python datasets/utils/merge_datasets.py \
 ```
 
 Requires datasets to pass the uniformity check (fps, features, codec). Tasks do not need to match — each source's prompts are merged into a unified task list and `task_index` values are remapped automatically.
+
+### relabel_bowls_and_merge.py — convert bowl positions to colors and merge
+
+```bash
+python datasets/utils/relabel_bowls_and_merge.py \
+    --output ETHrobotlearning/banana-bowls-color-prompts
+```
+
+Defaults to the six `ETHrobotlearning/config*-...` datasets. Each config name defines bowl colors from left to right, so `config1-red-blue-green` maps `1st bowl` to red, `2nd bowl` to blue, and `3rd bowl` to green. The script rewrites prompts like `Put the banana into the 2nd bowl from the left from the robot perspective` into `Put the banana in the blue colored bowl`, then merges the relabeled datasets.
+
+### color_prompts_to_negation.py — convert color prompts to negation prompts
+
+```bash
+python datasets/utils/color_prompts_to_negation.py
+```
+
+Defaults to `ETHrobotlearning/task2-colors` as input and `ETHrobotlearning/task2-negation` as output. It rewrites prompts like `Put the banana in the red colored bowl` into `Put the banana into the bowl that is not green and not blue.` while keeping the dataset frames and videos unchanged.
+
+### relabel_relative_bowls_and_merge.py — convert bowl positions to relative prompts
+
+```bash
+python datasets/utils/relabel_relative_bowls_and_merge.py
+```
+
+Defaults to the six `ETHrobotlearning/config*-...` datasets as input and `ETHrobotlearning/task2-relative` as output. It creates adjacent-reference prompts such as `Put the banana into the bowl on the right of the red bowl from the robot perspective`. Middle-bowl target episodes are duplicated so both valid prompt styles are present: `on the right of` the left neighbor and `on the left of` the right neighbor.
 
 ### trim_and_push.py — remove frozen-action frames
 
@@ -259,4 +287,3 @@ The remote script runs `wandb login` with up to 5 retries (20 s apart) before tr
 ### Error handling
 
 If any remote step fails (`set -euo pipefail` is active throughout `remote_train.sh`), `brev exec` returns a non-zero exit code, `orchestrate.py` catches the error, **deletes the instance immediately**, and exits with code 1. The same teardown happens on `Ctrl-C`.
-
