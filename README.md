@@ -25,6 +25,10 @@ tracelr/              Desktop episode viewer and annotation tool (own README)
 training/
   orchestrate.py      Local script — provisions Brev instance, drives the pipeline
   remote_train.sh     Remote script — runs on the GPU instance (do not run locally)
+  orchestrate_molmoact2.py
+                      Local Brev runner for MolmoAct2 SO100/SO101 fine-tuning
+  setup_and_train_molmoact2.sh
+                      Standalone MolmoAct2 setup + training script for Brev H100
 run_augmentation.py   Entry point for the augmentation pipeline
 run_benchmark.py      Entry point for VLM benchmarks
 trim_and_push.py      Trim frozen-action frames from a Hub dataset and re-push
@@ -304,3 +308,75 @@ The remote script runs `wandb login` with up to 5 retries (20 s apart) before tr
 ### Error handling
 
 If any remote step fails (`set -euo pipefail` is active throughout `remote_train.sh`), `brev exec` returns a non-zero exit code, `orchestrate.py` catches the error, **deletes the instance immediately**, and exits with code 1. The same teardown happens on `Ctrl-C`.
+
+---
+
+## 4. MolmoAct2 SO100/SO101 fine-tuning on Brev
+
+MolmoAct2 training uses the Ai2 MolmoAct2 LeRobot fork, not upstream
+Hugging Face LeRobot. The helper scripts are:
+
+- `training/orchestrate_molmoact2.py` — local Brev provisioner/runner
+- `training/setup_and_train_molmoact2.sh` — standalone script to run inside a Brev H100 instance
+
+Default MolmoAct2 settings:
+
+| Setting | Value |
+|---|---|
+| Dataset | `ETHrobotlearning/task3-TOY-clean` |
+| Initial checkpoint | `allenai/MolmoAct2-SO100_101` |
+| Camera key | `["observation.images.front"]` |
+| Training mode | VLM LoRA + fully trainable action expert |
+| Batch size | `32` |
+| Steps | `50000` |
+| Checkpoint frequency | every `5000` steps |
+| Action chunk | `10` |
+| Action mode | `continuous` |
+| Setup/control prompt | `single SO-100/SO-101 arm with one front RGB camera` / `absolute joint pose` |
+
+### Local Brev orchestration
+
+```bash
+export HF_TOKEN=hf_...
+export WANDB_API_KEY=...
+
+python training/orchestrate_molmoact2.py \
+    --output-repo-id ETHrobotlearning/molmoact2-task3-toy-lora
+```
+
+This creates a Brev H100 instance, installs MolmoAct2/LeRobot, launches
+training, pushes checkpoints to:
+
+```text
+ETHrobotlearning/molmoact2-task3-toy-lora-step5000
+ETHrobotlearning/molmoact2-task3-toy-lora-step10000
+...
+ETHrobotlearning/molmoact2-task3-toy-lora-step50000
+```
+
+and then deletes the instance unless `--keep-instance` is passed.
+
+### Standalone script inside Brev
+
+On a fresh Brev H100 instance:
+
+```bash
+export HF_TOKEN=hf_...
+export WANDB_API_KEY=...
+export OUTPUT_REPO_ID=ETHrobotlearning/molmoact2-task3-toy-lora
+
+bash setup_and_train_molmoact2.sh
+```
+
+Useful overrides:
+
+```bash
+BATCH_SIZE=16 TRAIN_STEPS=1000 WANDB_ENABLE=false PUSH_TO_HUB=false \
+  bash setup_and_train_molmoact2.sh
+```
+
+For a rerun on the same instance after setup has completed once:
+
+```bash
+SKIP_SETUP=true SKIP_DATASET_DOWNLOAD=true bash setup_and_train_molmoact2.sh
+```
