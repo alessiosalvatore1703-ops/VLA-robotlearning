@@ -259,6 +259,24 @@ def _update_episode_row(
     return row
 
 
+def _find_data_file_for_index(
+    ranges: List[Tuple[int, int, int, int]],
+    frame_index: int,
+) -> Tuple[int, int]:
+    """Return the source data parquet key containing ``frame_index``.
+
+    Some edited/augmented LeRobot datasets can have stale
+    ``meta/episodes:data/file_index`` values after data parquets are rewritten.
+    The frame ``index`` column in the actual data files is the authoritative
+    source for where an episode starts.
+    """
+
+    for chunk_index, file_index, start, end in ranges:
+        if start <= frame_index <= end:
+            return chunk_index, file_index
+    raise ValueError(f"Could not find data parquet containing frame index {frame_index}")
+
+
 # ---------------------------------------------------------------------------
 # Core merge
 # ---------------------------------------------------------------------------
@@ -285,20 +303,23 @@ def merge(sources: List[Path], dst: Path) -> None:
         src_tasks  = _load_tasks(src)     # src task_index → task string
 
         # ---- data parquets ------------------------------------------------
-        data_keys = (episodes[["data/chunk_index", "data/file_index"]]
-                     .drop_duplicates()
-                     .sort_values(["data/chunk_index", "data/file_index"]))
-
-        # mapping: (src_ci, src_fi) -> output file index
         data_file_map: Dict[Tuple[int,int], int] = {}
+        data_file_ranges: List[Tuple[int, int, int, int]] = []
 
-        for _, (ci, fi) in data_keys.iterrows():
-            ci, fi = int(ci), int(fi)
-            src_pq = src  / f"data/chunk-{ci:03d}/file-{fi:03d}.parquet"
+        data_files = sorted((src / "data").glob("chunk-*/file-*.parquet"))
+        if not data_files:
+            sys.exit(f"Error: no data parquet files in {src}/data/")
+
+        for src_pq in data_files:
+            ci = int(src_pq.parent.name.split("-")[1])
+            fi = int(src_pq.stem.split("-")[1])
             dst_pq = dst  / f"data/chunk-000/file-{out_data_fi:03d}.parquet"
             dst_pq.parent.mkdir(parents=True, exist_ok=True)
 
             df = pd.read_parquet(src_pq)
+            if "index" not in df.columns:
+                raise ValueError(f"{src_pq} has no 'index' column")
+            data_file_ranges.append((ci, fi, int(df["index"].min()), int(df["index"].max())))
             df["episode_index"] = df["episode_index"].astype(np.int64) + ep_offset
             df["index"]         = df["index"].astype(np.int64)         + frame_offset
             if "task_index" in df.columns:
@@ -328,8 +349,10 @@ def merge(sources: List[Path], dst: Path) -> None:
 
         # ---- episode metadata rows ----------------------------------------
         for _, ep_row in episodes.iterrows():
-            src_d_ci = int(ep_row["data/chunk_index"])
-            src_d_fi = int(ep_row["data/file_index"])
+            src_d_ci, src_d_fi = _find_data_file_for_index(
+                data_file_ranges,
+                int(ep_row["dataset_from_index"]),
+            )
             vk_new_fi = {
                 vk: vid_file_map[vk][(int(ep_row[f"videos/{vk}/chunk_index"]),
                                       int(ep_row[f"videos/{vk}/file_index"]))]
