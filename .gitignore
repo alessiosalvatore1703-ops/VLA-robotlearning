@@ -8,3 +8,4 @@ benchmarks/celebrity_recognition/results/*.json
 benchmarks/celebrity_recognition/data/raw/
 benchmarks/celebrity_recognition/data/scenes/
 benchmarks/celebrity_recognition/data/dataset.csv
+outputs/
