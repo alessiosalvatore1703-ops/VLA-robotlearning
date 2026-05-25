@@ -12,6 +12,33 @@ All scripts are run from the repo root and accept either local paths or Hugging 
 
 ---
 
+## Evaluation tasks
+
+The policy is evaluated on three setups of increasing difficulty. The robot is mounted at the edge of a white table with objects placed in a semicircle in front of it; each rollout has a 20-second time limit.
+
+### Task 1 — Color-conditioned pick-and-place
+
+Three bowls are arranged left-to-right (blue, red, green) with a small toy banana placed in front of the arm. Given a prompt of the form **"Put the banana in the [blue/red/green] colored bowl."**, the policy must drop the banana into the bowl of the named color. This is direct color lookup — the prompt names the target color explicitly.
+
+### Task 2 — Compositional instruction following
+
+Same bowl setup (with varying colors), but the prompts require reasoning beyond a direct color lookup, e.g. **"Put the banana into the 2nd bowl from the left."**, **"Put the banana into the bowl on the right of the red bowl."**, or **"Put the banana into the bowl that is not green and not blue."** The exact prompts are not known in advance. The relabeling utilities in `datasets/utils/` (ordinal → color, color → negation, ordinal → relative) generate training data for these phrasings.
+
+### Task 3 — Place the can on a celebrity
+
+DIN A5 portrait prints of celebrities are placed in a semicircle with a 330 ml slim coke can standing in the middle. Given a prompt of the form **"Place the coke on [celebrity name]"**, the policy must place the can on top of the correct portrait. In-distribution identities are Taylor Swift, Barack Obama and Yann LeCun; some rollouts use out-of-distribution celebrities (e.g. Roger Federer, Angela Merkel). The `augmentation/celebrity_swap/` pipeline expands identity coverage by compositing different faces onto the printed cards.
+
+**Autonomous rollouts — prompt: _"Put the coke can on Barack Obama"_**
+
+<table>
+  <tr>
+    <td width="50%"><video src="https://github.com/alessiosalvatore1703-ops/VLA-robotlearning/raw/main/docs/eval3_coke_obama_1.mp4" controls muted width="100%"></video></td>
+    <td width="50%"><video src="https://github.com/alessiosalvatore1703-ops/VLA-robotlearning/raw/main/docs/eval3_coke_obama_2.mp4" controls muted width="100%"></video></td>
+  </tr>
+</table>
+
+---
+
 ## Setup
 
 ```bash
