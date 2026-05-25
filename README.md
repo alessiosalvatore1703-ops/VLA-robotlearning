@@ -32,8 +32,8 @@ DIN A5 portrait prints of celebrities are placed in a semicircle with a 330 ml s
 
 <table>
   <tr>
-    <td width="50%"><video src="https://github.com/alessiosalvatore1703-ops/VLA-robotlearning/raw/main/docs/eval3_coke_obama_1.mp4" controls muted width="100%"></video></td>
-    <td width="50%"><video src="https://github.com/alessiosalvatore1703-ops/VLA-robotlearning/raw/main/docs/eval3_coke_obama_2.mp4" controls muted width="100%"></video></td>
+    <td width="50%"><img src="https://github.com/alessiosalvatore1703-ops/VLA-robotlearning/raw/main/docs/eval3_coke_obama_1.gif" width="100%" alt="Autonomous rollout 1 — place the coke can on Barack Obama"></td>
+    <td width="50%"><img src="https://github.com/alessiosalvatore1703-ops/VLA-robotlearning/raw/main/docs/eval3_coke_obama_2.gif" width="100%" alt="Autonomous rollout 2 — place the coke can on Barack Obama"></td>
   </tr>
 </table>
 
