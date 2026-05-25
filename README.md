@@ -80,6 +80,78 @@ pip install -r requirements.txt
 
 ---
 
+## Evaluation Submission
+
+This repository includes one runnable script per evaluation task. Each script:
+
+1. checks that `lerobot-rollout` is available,
+2. installs a local evaluation environment if needed,
+3. prints the selected policy checkpoint and parameter count,
+4. runs a normal SO-101 rollout with the requested task prompt.
+
+Final policy checkpoints are not committed to this repository. They are loaded from the Hugging Face Hub by default. If you want to pre-download them, run:
+
+```bash
+python scripts/download_eval_policies.py
+```
+
+That command creates a local `policy_checkpoints/` cache, which is ignored by git. The evaluation scripts use the local cache when present and otherwise fall back to the explicit Hub model IDs below:
+
+| Eval | Local cache path | Hub model ID | Default prompt |
+|---|---|---|---|
+| Task 1 | `policy_checkpoints/task1` | `ETHrobotlearning/task1-dagger_038000` | `Place the banana to the red colored bowl.` |
+| Task 2 | `policy_checkpoints/task2` | `ETHrobotlearning/smolvla_task2_colors_dagger_lr2e-5-step2000` | `Put the banana in the green colored bowl.` |
+| Task 3 | `policy_checkpoints/task3` | `Alessio03/smolvla-task3-50k` | `Place the coke on Yann LeCun.` |
+
+### Hardware Defaults
+
+The scripts assume the same SO-101 setup used for collection/evaluation:
+
+```bash
+ROBOT_PORT=/dev/tty.usbmodem5B140319121
+ROBOT_ID=my_awesome_follower_arm
+POLICY_DEVICE=mps
+FPS=10
+DURATION=20
+```
+
+Override any value with an environment variable, for example:
+
+```bash
+export ROBOT_PORT=/dev/tty.usbmodemXXXX
+export POLICY_DEVICE=cuda
+export DURATION=40
+```
+
+### Run Evaluation
+
+Run the default prompt for each task:
+
+```bash
+./run_eval_1.sh
+./run_eval_2.sh
+./run_eval_3.sh
+```
+
+Run with a custom prompt by passing it as the first argument:
+
+```bash
+./run_eval_2.sh "Put the banana into the bowl that is not red and not blue."
+./run_eval_3.sh "Place the coke on Barack Obama."
+```
+
+The scripts return the robot to its startup joint position during teardown with:
+
+```bash
+--return_to_initial_position=true
+```
+
+### Policy Method Summary
+
+For Task 1, we collected demonstrations and trained SmolVLA directly with an 8-layer VLM backbone, since the task did not require a highly expressive visual-language representation. For Task 2, we trained on multiple demonstrations augmented with diverse prompt variants, roughly five prompts per episode, then used a standard 16-layer SmolVLA backbone. The resulting policy was treated as a base policy and further fine-tuned on weaker cases, which acts as a small curriculum-learning pipeline. For Task 3, we followed the same methodology as Task 2. We also tried co-training/fine-tuning the VLM backbone, but this did not improve performance, so the final approach kept the pretrained VLM representation and focused on action-policy fine-tuning.
+
+---
+
 ## Repository structure
 
 ```
@@ -112,6 +184,9 @@ training/
   remote_train.sh             Remote script driven by orchestrate.py (do not run locally)
   checkpoint_to_policy.py     Convert a checkpoint repo into a standalone, loadable policy repo
   count_policy_params.py      Print a policy's parameter count and run lerobot-rollout
+  orchestrate_molmoact2.py    Local Brev runner for MolmoAct2 SO100/SO101 fine-tuning
+  setup_and_train_molmoact2.sh
+                              Standalone MolmoAct2 setup + training script for Brev H100
 
 lerobot-doctor/               Vendored dataset-quality diagnostics tool
 tracelr/                      Git submodule — desktop episode viewer / annotation tool
@@ -347,5 +422,116 @@ python training/count_policy_params.py USER/smolvla-final
 ```
 
 The output of `checkpoint_to_policy.py` is loadable directly via `--policy.pretrained_path=<output>`.
-</content>
-</invoke>
+
+### What happens step by step
+
+```
+[local]   brev create smolvla-training --type g5.xlarge
+[local]   poll brev ls --json until RUNNING  (+30 s SSH grace period)
+[local]   brev refresh  (update SSH alias to current hostname)
+[local]   ssh smolvla-training 'bash -s' < preamble.sh  ← writes /tmp/.lerobot_env
+[local]   ssh smolvla-training 'bash -s' < remote_train.sh  ← blocks here (~hours)
+  [remote]  curl miniforge installer + bash install
+  [remote]  conda create -n lerobot python=3.12 pip
+  [remote]  pip install lerobot[smolvla,dataset] wandb av
+  [remote]  hf auth login --token $HF_TOKEN
+  [remote]  wandb login (up to 5 retries for network readiness)
+  [remote]  lerobot-train --policy.type=smolvla
+                          --policy.pretrained_path=lerobot/smolvla_base
+                          --dataset.video_backend=pyav
+                          --policy.push_to_hub=true ...
+  [remote]  rm /tmp/.lerobot_env
+[local]   brev delete smolvla-training
+```
+
+### Using Weights & Biases
+
+Pass both flags together:
+
+```bash
+python training/orchestrate.py \
+    --dataset-repo-id USERNAME/my-dataset \
+    --output-repo-id  USERNAME/my-smolvla \
+    --wandb-enable \
+    --wandb-api-key   YOUR_WANDB_API_KEY   # or export WANDB_API_KEY=... beforehand
+```
+
+Find your API key at <https://wandb.ai/settings>. The script will exit with an error if `--wandb-enable` is set but no key is provided.
+
+The remote script runs `wandb login` with up to 5 retries (20 s apart) before training starts, because Brev instances sometimes take a minute to reach `api.wandb.ai` after boot. `WANDB_INIT_TIMEOUT` and `WANDB_HTTP_TIMEOUT` are also increased to tolerate slow cold-start networks.
+
+### Error handling
+
+If any remote step fails (`set -euo pipefail` is active throughout `remote_train.sh`), `brev exec` returns a non-zero exit code, `orchestrate.py` catches the error, **deletes the instance immediately**, and exits with code 1. The same teardown happens on `Ctrl-C`.
+
+---
+
+## 4. MolmoAct2 SO100/SO101 fine-tuning on Brev
+
+MolmoAct2 training uses the Ai2 MolmoAct2 LeRobot fork, not upstream
+Hugging Face LeRobot. The helper scripts are:
+
+- `training/orchestrate_molmoact2.py` — local Brev provisioner/runner
+- `training/setup_and_train_molmoact2.sh` — standalone script to run inside a Brev H100 instance
+
+Default MolmoAct2 settings:
+
+| Setting | Value |
+|---|---|
+| Dataset | `ETHrobotlearning/task3-TOY-clean` |
+| Initial checkpoint | `allenai/MolmoAct2-SO100_101` |
+| Camera key | `["observation.images.front"]` |
+| Training mode | VLM LoRA + fully trainable action expert |
+| Batch size | `32` |
+| Steps | `50000` |
+| Checkpoint frequency | every `5000` steps |
+| Action chunk | `10` |
+| Action mode | `continuous` |
+| Setup/control prompt | `single SO-100/SO-101 arm with one front RGB camera` / `absolute joint pose` |
+
+### Local Brev orchestration
+
+```bash
+export HF_TOKEN=hf_...
+export WANDB_API_KEY=...
+
+python training/orchestrate_molmoact2.py \
+    --output-repo-id ETHrobotlearning/molmoact2-task3-toy-lora
+```
+
+This creates a Brev H100 instance, installs MolmoAct2/LeRobot, launches
+training, pushes checkpoints to:
+
+```text
+ETHrobotlearning/molmoact2-task3-toy-lora-step5000
+ETHrobotlearning/molmoact2-task3-toy-lora-step10000
+...
+ETHrobotlearning/molmoact2-task3-toy-lora-step50000
+```
+
+and then deletes the instance unless `--keep-instance` is passed.
+
+### Standalone script inside Brev
+
+On a fresh Brev H100 instance:
+
+```bash
+export HF_TOKEN=hf_...
+export WANDB_API_KEY=...
+export OUTPUT_REPO_ID=ETHrobotlearning/molmoact2-task3-toy-lora
+
+bash setup_and_train_molmoact2.sh
+```
+
+Useful overrides:
+
+```bash
+BATCH_SIZE=16 TRAIN_STEPS=1000 WANDB_ENABLE=false PUSH_TO_HUB=false \
+  bash setup_and_train_molmoact2.sh
+```
+
+For a rerun on the same instance after setup has completed once:
+
+```bash
+SKIP_SETUP=true SKIP_DATASET_DOWNLOAD=true bash setup_and_train_molmoact2.sh
+```

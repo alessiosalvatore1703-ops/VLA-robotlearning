@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""FastAPI server for LeRobot-saved MolmoAct2 checkpoints.
+
+Use this for checkpoints produced by LeRobot training, e.g.
+ETHrobotlearning/molmoact2-task3-TOY-clean-step1000.
+
+This is different from inference/molmoact2_server.py, which loads the original
+AllenAI Transformers checkpoint format directly.
+"""
+
+import argparse
+import base64
+import inspect
+import io
+import json
+import os
+import sys
+import traceback
+from contextlib import nullcontext
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+from fastapi import FastAPI, HTTPException
+from PIL import Image
+from pydantic import BaseModel, Field
+
+# Allow running this server on a fresh Brev instance before `pip install -e`
+# has correctly registered the local AllenAI LeRobot checkout.
+DEFAULT_LEROBOT_SRC = Path(os.environ.get("LEROBOT_SRC", "~/lerobot-molmoact2/src")).expanduser()
+if DEFAULT_LEROBOT_SRC.is_dir():
+    sys.path.insert(0, str(DEFAULT_LEROBOT_SRC))
+
+from lerobot.policies.factory import make_pre_post_processors
+from lerobot.policies.molmoact2 import MolmoAct2Policy
+
+
+class ActRequest(BaseModel):
+    task: str
+    state: list[float] = Field(..., min_length=6, max_length=6)
+    images: list[str] = Field(..., min_length=1)
+    num_steps: int = 10
+
+
+class ActResponse(BaseModel):
+    actions: list[list[float]]
+    shape: list[int]
+    policy_path: str
+    image_keys: list[str]
+    dtype: str
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--policy-path",
+        default="ETHrobotlearning/molmoact2-task3-TOY-clean-step1000",
+        help="LeRobot MolmoAct2 checkpoint path or Hub model repo.",
+    )
+    parser.add_argument(
+        "--image-keys",
+        default='["observation.images.front"]',
+        help="JSON list of image keys in the same order as request.images.",
+    )
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--dtype", choices=["bfloat16", "float16", "float32"], default="bfloat16")
+    parser.add_argument("--inference-action-mode", default="continuous")
+    parser.add_argument(
+        "--actions-per-request",
+        type=int,
+        default=3,
+        help="Number of queued policy actions to return per /act request.",
+    )
+    parser.add_argument(
+        "--disable-cuda-graph",
+        action="store_true",
+        help="Disable MolmoAct2 inference CUDA graph if the checkpoint supports it.",
+    )
+    return parser.parse_args()
+
+
+def torch_dtype(name: str) -> torch.dtype:
+    if name == "bfloat16":
+        return torch.bfloat16
+    if name == "float16":
+        return torch.float16
+    if name == "float32":
+        return torch.float32
+    raise ValueError(f"Unsupported dtype: {name}")
+
+
+def decode_image(encoded: str) -> np.ndarray:
+    if "," in encoded and encoded.split(",", 1)[0].startswith("data:image/"):
+        encoded = encoded.split(",", 1)[1]
+
+    raw = base64.b64decode(encoded, validate=True)
+    image = Image.open(io.BytesIO(raw)).convert("RGB")
+    return np.asarray(image, dtype=np.uint8)
+
+
+def to_numpy_action(value: Any) -> np.ndarray:
+    if isinstance(value, dict):
+        if "action" in value:
+            value = value["action"]
+        else:
+            raise RuntimeError(f"Postprocessor returned a dict without 'action': {value.keys()}")
+
+    if isinstance(value, torch.Tensor):
+        array = value.detach().cpu().float().numpy()
+    else:
+        array = np.asarray(value, dtype=np.float32)
+
+    if array.ndim == 3 and array.shape[0] == 1:
+        array = array[0]
+    if array.ndim == 2 and array.shape[0] == 1:
+        array = array[0]
+    if array.ndim != 1:
+        raise RuntimeError(f"Expected one action vector, got shape {array.shape}.")
+    return array.astype(np.float32)
+
+
+def create_app(args: argparse.Namespace) -> FastAPI:
+    image_keys = json.loads(args.image_keys)
+    if not isinstance(image_keys, list) or not all(isinstance(k, str) for k in image_keys):
+        raise ValueError("--image-keys must be a JSON list of strings.")
+
+    device = torch.device(args.device)
+    dtype = torch_dtype(args.dtype)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested but torch.cuda.is_available() is false.")
+
+    policy = MolmoAct2Policy.from_pretrained(args.policy_path).to(device).eval()
+    select_action_params = inspect.signature(policy.select_action).parameters
+
+    # Allow CLI overrides for normal remote inference.
+    if hasattr(policy.config, "model_dtype"):
+        policy.config.model_dtype = args.dtype
+    if hasattr(policy.config, "inference_action_mode"):
+        policy.config.inference_action_mode = args.inference_action_mode
+    if hasattr(policy.config, "enable_inference_cuda_graph"):
+        policy.config.enable_inference_cuda_graph = not args.disable_cuda_graph
+    if hasattr(policy.config, "image_keys") and not getattr(policy.config, "image_keys", None):
+        policy.config.image_keys = image_keys
+
+    preprocess, postprocess = make_pre_post_processors(
+        policy.config,
+        args.policy_path,
+        preprocessor_overrides={"device_processor": {"device": str(device)}},
+    )
+
+    app = FastAPI(title="MolmoAct2 LeRobot policy inference server")
+
+    @app.get("/health")
+    def health() -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "policy_path": args.policy_path,
+            "image_keys": image_keys,
+            "dtype": args.dtype,
+            "device": str(device),
+            "cuda_graph": not args.disable_cuda_graph,
+            "inference_action_mode": args.inference_action_mode,
+            "actions_per_request": args.actions_per_request,
+        }
+
+    @app.post("/act", response_model=ActResponse)
+    def act(req: ActRequest) -> ActResponse:
+        if len(req.images) != len(image_keys):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Expected {len(image_keys)} image(s) for keys {image_keys}, got {len(req.images)}.",
+            )
+
+        try:
+            frame: dict[str, Any] = {
+                "observation.state": np.asarray(req.state, dtype=np.float32),
+                "task": req.task,
+            }
+            for key, encoded in zip(image_keys, req.images, strict=True):
+                frame[key] = decode_image(encoded)
+
+            batch = preprocess(frame)
+
+            actions = []
+            use_amp = device.type == "cuda" and dtype in {torch.bfloat16, torch.float16}
+            amp_context = torch.autocast(device.type, dtype=dtype) if use_amp else nullcontext()
+            with torch.inference_mode(), amp_context:
+                for _ in range(max(1, int(args.actions_per_request))):
+                    select_kwargs = {"inference_action_mode": args.inference_action_mode}
+                    if "num_steps" in select_action_params:
+                        select_kwargs["num_steps"] = req.num_steps
+                    raw_action = policy.select_action(batch, **select_kwargs)
+                    action = postprocess(raw_action)
+                    actions.append(to_numpy_action(action))
+
+            action_array = np.stack(actions, axis=0).astype(np.float32)
+            return ActResponse(
+                actions=action_array.tolist(),
+                shape=list(action_array.shape),
+                policy_path=args.policy_path,
+                image_keys=image_keys,
+                dtype=args.dtype,
+            )
+        except Exception as exc:
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"MolmoAct2 LeRobot prediction failed: {exc}") from exc
+
+    return app
+
+
+def main() -> None:
+    args = parse_args()
+
+    import uvicorn
+
+    app = create_app(args)
+    uvicorn.run(app, host=args.host, port=args.port)
+
+
+if __name__ == "__main__":
+    main()

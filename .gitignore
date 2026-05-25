@@ -15,8 +15,23 @@ benchmarks/celebrity_recognition/data/dataset.csv
 /ETHrobotlearning/
 /output/
 /viz_output*/
+outputs/
+/teleop_data_submission/
+*.zip
+
+# Local review / inference artifacts
+/trim_review_frames/
+/trim_indices.json
+/molmoact2_query_image.jpg
+/molmoact2_last_rollout_image.jpg
+/molmoact2_last_rollout_response.json
 
 # Model weights (re-downloadable / checkpoints)
+/policy_checkpoints/
 *.pt
 *.pth
+*.safetensors
 *.onnx
+
+# Local OS artifacts
+.DS_Store

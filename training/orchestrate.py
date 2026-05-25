@@ -13,8 +13,9 @@ Usage:
         --dataset-repo-id USERNAME/my-lerobot-dataset \
         --output-repo-id  USERNAME/my-smolvla \
         [--hf-token TOKEN]          # or set $HF_TOKEN
-        [--train-steps 20000]
-        [--batch-size 128]
+        [--train-steps 30000]
+        [--batch-size 32]
+        [--save-freq 10000]
         [--instance-name smolvla-training]
         [--wandb-enable]
 
@@ -242,14 +243,48 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--train-steps",
         type=int,
-        default=20000,
-        help="Number of fine-tuning gradient steps (~1 h on H100 at 20 k steps with batch 128).",
+        default=30000,
+        help="Number of fine-tuning gradient steps.",
     )
     p.add_argument(
         "--batch-size",
         type=int,
-        default=128,
-        help="Training batch size. H100 (80 GB) comfortably runs 128; reduce if OOM.",
+        default=32,
+        help="Training batch size. Reduce if the instance runs out of memory.",
+    )
+    p.add_argument(
+        "--save-freq",
+        type=int,
+        default=10000,
+        help="Save and push a separate Hub model repo every N training steps.",
+    )
+    p.add_argument(
+        "--action-chunk-size",
+        type=int,
+        default=10,
+        help="SmolVLA policy.chunk_size.",
+    )
+    p.add_argument(
+        "--n-action-steps",
+        type=int,
+        default=10,
+        help="SmolVLA policy.n_action_steps.",
+    )
+    p.add_argument(
+        "--vlm-num-layers",
+        type=int,
+        default=16,
+        help="SmolVLA policy.num_vlm_layers.",
+    )
+    p.add_argument(
+        "--job-name",
+        default="smolvla_eval2_topview_chunk10_30k",
+        help="LeRobot/W&B job name.",
+    )
+    p.add_argument(
+        "--output-dir",
+        default="",
+        help="Remote output directory. Defaults to ~/outputs/train/$JOB_NAME in remote_train.sh.",
     )
     p.add_argument(
         "--instance-name",
@@ -302,8 +337,15 @@ def main() -> None:
         f"export OUTPUT_REPO_ID='{args.output_repo_id}'",
         f"export TRAIN_STEPS='{args.train_steps}'",
         f"export BATCH_SIZE='{args.batch_size}'",
+        f"export SAVE_FREQ='{args.save_freq}'",
+        f"export ACTION_CHUNK_SIZE='{args.action_chunk_size}'",
+        f"export N_ACTION_STEPS='{args.n_action_steps}'",
+        f"export VLM_NUM_LAYERS='{args.vlm_num_layers}'",
+        f"export JOB_NAME='{args.job_name}'",
         f"export WANDB_ENABLE='{'true' if args.wandb_enable else 'false'}'",
     ]
+    if args.output_dir:
+        cred_lines.append(f"export OUTPUT_DIR='{args.output_dir}'")
     if args.wandb_api_key:
         cred_lines.append(f"export WANDB_API_KEY='{args.wandb_api_key}'")
 
