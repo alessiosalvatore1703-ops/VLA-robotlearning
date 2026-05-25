@@ -383,6 +383,7 @@ export WANDB_API_KEY=...          # only if WANDB_ENABLE="true"
 bash training/setup_and_train.sh
 ```
 
+
 It is idempotent and runs six stages: install miniforge → create a Python 3.12 `lerobot` env → install LeRobot + SmolVLA extras → authenticate with HF (and optionally W&B) → download the dataset locally → run `lerobot-train` on `lerobot/smolvla_base`. A background watcher pushes each new checkpoint to `OUTPUT_REPO_ID` as it is written, then frees the local copy. Edit `DATASET_REPO_ID`, `OUTPUT_REPO_ID`, `TRAIN_STEPS`, `BATCH_SIZE`, `LR`, `SAVE_FREQ`, `RESUME` and `WANDB_ENABLE` in the CONFIG block.
 
 > No episode-level train/val split is applied — LeRobot's frame sampler does not respect the episodes filter reliably. Monitor overfitting via the W&B training loss and evaluate on the real robot.
