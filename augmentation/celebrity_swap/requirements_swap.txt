@@ -1,0 +1,8 @@
+# All dependencies are already present in the lerobot conda env:
+#   numpy, opencv-python, torch, torchvision, scipy, Pillow,
+#   transformers (for CLIP), datasets, huggingface_hub
+#
+# Nothing extra to install — just activate /opt/miniconda3/envs/lerobot
+
+# Optional: install mediapipe for higher-accuracy face detection
+# pip install mediapipe

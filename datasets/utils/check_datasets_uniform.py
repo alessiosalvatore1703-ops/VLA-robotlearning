@@ -6,6 +6,10 @@ Loads meta/info.json from each dataset and compares:
   - feature keys, dtypes, shapes
   - video codec, pixel format, and in-video fps for each camera stream
 
+Also loads per-episode metadata and verifies that every episode index has
+an identical prompt/task across all datasets (e.g. episode 7 must have the
+same prompt in both datasets).
+
 Usage:
     # Local paths
     python datasets/utils/check_datasets_uniform.py /path/to/ds1 /path/to/ds2
@@ -50,6 +54,83 @@ def _tasks_from_parquet(path: str) -> List[Dict]:
     return []
 
 
+def _norm_task(val: Any) -> List[str]:
+    """Normalize an episode's task(s) into a sorted list of strings."""
+    if val is None:
+        return []
+    if isinstance(val, str):
+        return [val]
+    try:
+        # lists, tuples, numpy arrays, pandas Series
+        return sorted(str(x) for x in val)
+    except TypeError:
+        return [str(val)]
+
+
+def _episode_prompts_from_episodes_df(df: pd.DataFrame) -> Dict[int, List[str]]:
+    """Extract {episode_index: [task, ...]} from an episodes-metadata DataFrame."""
+    df = df.reset_index()
+    idx_col = "episode_index" if "episode_index" in df.columns else None
+    task_col = next((c for c in ("tasks", "task") if c in df.columns), None)
+    if idx_col is None or task_col is None:
+        return {}
+    out: Dict[int, List[str]] = {}
+    for _, row in df.iterrows():
+        out[int(row[idx_col])] = _norm_task(row[task_col])
+    return out
+
+
+def _episode_prompts_from_jsonl(lines: List[str]) -> Dict[int, List[str]]:
+    out: Dict[int, List[str]] = {}
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        rec = json.loads(line)
+        ei = rec.get("episode_index")
+        if ei is None:
+            continue
+        tasks = rec.get("tasks", rec.get("task"))
+        out[int(ei)] = _norm_task(tasks)
+    return out
+
+
+def _load_episode_prompts_local(meta_dir: Path) -> Dict[int, List[str]]:
+    ep_jsonl = meta_dir / "episodes.jsonl"
+    if ep_jsonl.exists():
+        with open(ep_jsonl) as f:
+            return _episode_prompts_from_jsonl(list(f))
+    ep_dir = meta_dir / "episodes"
+    if ep_dir.is_dir():
+        out: Dict[int, List[str]] = {}
+        for pq in sorted(ep_dir.glob("**/*.parquet")):
+            out.update(_episode_prompts_from_episodes_df(pd.read_parquet(pq)))
+        return out
+    return {}
+
+
+def _load_episode_prompts_hf(repo_id: str) -> Dict[int, List[str]]:
+    from huggingface_hub import hf_hub_download, HfApi
+    from huggingface_hub.utils import EntryNotFoundError
+
+    try:
+        ep_path = hf_hub_download(repo_id=repo_id, filename="meta/episodes.jsonl", repo_type="dataset")
+        with open(ep_path) as f:
+            return _episode_prompts_from_jsonl(list(f))
+    except EntryNotFoundError:
+        pass
+
+    files = HfApi().list_repo_files(repo_id=repo_id, repo_type="dataset")
+    ep_files = sorted(
+        f for f in files if f.startswith("meta/episodes/") and f.endswith(".parquet")
+    )
+    out: Dict[int, List[str]] = {}
+    for f in ep_files:
+        p = hf_hub_download(repo_id=repo_id, filename=f, repo_type="dataset")
+        out.update(_episode_prompts_from_episodes_df(pd.read_parquet(p)))
+    return out
+
+
 def _load_local(path: Path) -> Dict:
     meta_dir = path / "meta"
     with open(meta_dir / "info.json") as f:
@@ -63,7 +144,11 @@ def _load_local(path: Path) -> Dict:
                     tasks.append(json.loads(line))
     elif (meta_dir / "tasks.parquet").exists():
         tasks = _tasks_from_parquet(str(meta_dir / "tasks.parquet"))
-    return {"info": info, "tasks": tasks}
+    return {
+        "info": info,
+        "tasks": tasks,
+        "episode_prompts": _load_episode_prompts_local(meta_dir),
+    }
 
 
 def _load_hf(repo_id: str) -> Dict:
@@ -94,7 +179,11 @@ def _load_hf(repo_id: str) -> Dict:
         tasks_path = hf_hub_download(repo_id=repo_id, filename="meta/tasks.parquet", repo_type="dataset")
         tasks = _tasks_from_parquet(tasks_path)
 
-    return {"info": info, "tasks": tasks}
+    return {
+        "info": info,
+        "tasks": tasks,
+        "episode_prompts": _load_episode_prompts_hf(repo_id),
+    }
 
 
 def load_meta(dataset: str) -> Dict:
@@ -212,6 +301,68 @@ def compare_and_report(datasets: List[str], metas: List[Dict]) -> bool:
     return True
 
 
+def compare_episode_prompts(datasets: List[str], metas: List[Dict]) -> bool:
+    """Check that every episode index has an identical prompt across all datasets."""
+    prompts = [m.get("episode_prompts") or {} for m in metas]
+
+    print()
+    print(_color("Episode prompt check:", _BOLD))
+
+    missing = [i for i, p in enumerate(prompts) if not p]
+    if missing:
+        for i in missing:
+            print(_color(
+                f"  [{i}] {_short_name(datasets[i])}: no per-episode metadata found",
+                _RED,
+            ))
+        print(_color("  Skipping prompt check — cannot verify.", _RED))
+        return False
+
+    all_eps = sorted(set().union(*(set(p) for p in prompts)))
+    common = set(prompts[0])
+    for p in prompts[1:]:
+        common &= set(p)
+
+    index_mismatches = [ep for ep in all_eps if ep not in common]
+    prompt_mismatches: List[Tuple[int, List[List[str]]]] = []
+    for ep in sorted(common):
+        values = [p[ep] for p in prompts]
+        if len({_serialize(v) for v in values}) != 1:
+            prompt_mismatches.append((ep, values))
+
+    n_match = len(common) - len(prompt_mismatches)
+    print(f"  episodes compared: {len(common)}  matching: {n_match}")
+
+    if index_mismatches:
+        print()
+        print(_color(
+            f"  EPISODE INDEX MISMATCH ({len(index_mismatches)} episode(s) "
+            f"not present in all datasets):", _RED,
+        ))
+        for ep in index_mismatches:
+            present = [i for i, p in enumerate(prompts) if ep in p]
+            print(f"    episode {ep}: only in datasets {present}")
+
+    if prompt_mismatches:
+        print()
+        print(_color(
+            f"  PROMPT MISMATCH ({len(prompt_mismatches)} episode(s)):", _RED,
+        ))
+        for ep, values in prompt_mismatches:
+            print()
+            print(_color(f"    episode {ep}:", _RED))
+            for i, (d, v) in enumerate(zip(datasets, values)):
+                print(f"      [{i}] {_short_name(d)}: {v!r}")
+
+    if index_mismatches or prompt_mismatches:
+        print()
+        print(_color("Episode prompts do NOT match across datasets.", _RED))
+        return False
+
+    print(_color("  All episode prompts match across datasets.", _GREEN))
+    return True
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -246,8 +397,9 @@ def main() -> None:
             print(f"FAILED\n  Error: {exc}", file=sys.stderr)
             sys.exit(1)
 
-    ok = compare_and_report(args.datasets, metas)
-    sys.exit(0 if ok else 1)
+    ok_fields = compare_and_report(args.datasets, metas)
+    ok_prompts = compare_episode_prompts(args.datasets, metas)
+    sys.exit(0 if (ok_fields and ok_prompts) else 1)
 
 
 if __name__ == "__main__":

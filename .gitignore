@@ -8,3 +8,15 @@ benchmarks/celebrity_recognition/results/*.json
 benchmarks/celebrity_recognition/data/raw/
 benchmarks/celebrity_recognition/data/scenes/
 benchmarks/celebrity_recognition/data/dataset.csv
+
+# Downloaded datasets, HF caches, training outputs (re-pullable / regenerable)
+/dataset/
+/hf_cache/
+/ETHrobotlearning/
+/output/
+/viz_output*/
+
+# Model weights (re-downloadable / checkpoints)
+*.pt
+*.pth
+*.onnx

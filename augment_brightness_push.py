@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
-Augment a LeRobot v3 dataset on the HuggingFace Hub with one brightness-augmented
-copy of the source, where the source is split into N contiguous partitions
-(N = number of brightness levels) and each partition is rendered at a single
-brightness multiplier.
+Augment a LeRobot v3 dataset on the HuggingFace Hub *in place*: each source
+episode's video is re-encoded at a single brightness multiplier. The dataset
+keeps exactly the same number of episodes — no episodes are duplicated.
 
 For S source episodes and L brightness levels:
-  - Output episodes 0..S-1            = originals (videos copied unchanged)
-  - Output episodes S..2*S-1          = augmented copies
-        Each source episode i is assigned brightness levels[(i * L) // S].
-        Final size = 2 * source.
+  - Each source episode is assigned one brightness level chosen uniformly at
+    random (reproducible via --seed).
+  - Output has exactly S episodes (same count as the source).
 
 All non-image fields (action, observation.state, timestamps, task_index,
-per-episode stats) are copied from the source — only the pixels change.
+per-episode stats) are copied from the source unchanged — only the pixels change.
 
 Usage:
     python augment_brightness_push.py --src user/my_dataset --dst user/my_dataset_bright
@@ -23,6 +21,7 @@ Usage:
 import argparse
 import json
 import os
+import random
 import shutil
 import tempfile
 from pathlib import Path
@@ -43,11 +42,6 @@ VIDEO_PRESET = 8         # SVT-AV1 speed preset (0=slowest/best, 12=fastest)
 
 def discover_video_keys(info: dict) -> list[str]:
     return [k for k, v in info.get("features", {}).items() if v.get("dtype") == "video"]
-
-
-def episode_partition(ep_idx: int, n_episodes: int, n_levels: int) -> int:
-    """Assign each source episode to one of n_levels contiguous partitions."""
-    return (ep_idx * n_levels) // n_episodes
 
 
 def reencode_per_frame_brightness(
@@ -98,19 +92,12 @@ def reencode_per_frame_brightness(
 
 
 def build_output_data_parquets(src_df, out_dir: Path):
-    """Concat originals followed by one augmented block (episode_index and index shifted)."""
-    import pandas as pd
+    """Write the source data parquets unchanged — no episodes are duplicated.
 
-    n_src_episodes = int(src_df["episode_index"].max()) + 1
-    n_src_frames = len(src_df)
-
-    blocks = [src_df.copy()]
-    aug = src_df.copy()
-    aug["episode_index"] = aug["episode_index"] + n_src_episodes
-    aug["index"] = aug["index"] + n_src_frames
-    blocks.append(aug)
-
-    out_df = pd.concat(blocks, ignore_index=True)
+    Only the video pixels are augmented; every non-image field (and therefore
+    episode_index / index) is identical to the source.
+    """
+    out_df = src_df.copy()
 
     ep_data_loc: dict[int, tuple[int, int]] = {}
     file_idx = 0
@@ -127,21 +114,67 @@ def build_output_data_parquets(src_df, out_dir: Path):
     return out_df, ep_data_loc, file_idx
 
 
+def dedup_episodes_meta(orig_ep_meta, src_df):
+    """Drop stale/duplicate rows from a corrupt episodes-metadata table.
+
+    Some datasets ship an episodes parquet with more rows than real episodes
+    (leftover phantom rows from earlier edits/merges). The data parquets are
+    the source of truth: for each episode_index we keep the meta row whose
+    [dataset_from_index, dataset_to_index) matches the episode's actual frame
+    range in src_df, and drop any episode_index not present in the data.
+    """
+    actual = {}
+    for ep_id, grp in src_df.groupby("episode_index"):
+        actual[int(ep_id)] = (int(grp["index"].min()), int(grp["index"].max()) + 1)
+
+    kept_rows = []
+    dropped = 0
+    for ep_id, grp in orig_ep_meta.groupby("episode_index"):
+        ep_id = int(ep_id)
+        if ep_id not in actual:
+            dropped += len(grp)
+            continue
+        if len(grp) == 1:
+            kept_rows.append(grp.iloc[0])
+            continue
+        from_idx, to_idx = actual[ep_id]
+        match = grp[
+            (grp["dataset_from_index"] == from_idx)
+            & (grp["dataset_to_index"] == to_idx)
+        ]
+        if len(match) >= 1:
+            kept_rows.append(match.iloc[0])
+        else:
+            kept_rows.append(grp.iloc[0])  # no match: keep first as fallback
+        dropped += len(grp) - 1
+
+    import pandas as pd
+
+    deduped = (
+        pd.DataFrame(kept_rows)
+        .sort_values("episode_index")
+        .reset_index(drop=True)
+    )
+    if dropped:
+        print(f"  WARNING: source episodes meta had {dropped} stale/duplicate "
+              f"row(s); kept {len(deduped)} episode(s) matching the data parquets")
+    return deduped
+
+
 def build_episodes_meta(
     orig_ep_meta,
-    video_keys: list[str],
-    src_video_file_counts: dict[str, int],
     out_df,
     ep_data_loc: dict[int, tuple[int, int]],
     out_dir: Path,
 ):
-    """Build 2*S episode rows: S originals followed by S augmented copies."""
+    """Rebuild the S episode rows in place — same episodes, same video positions.
+
+    Videos are re-encoded under their original file index, so no video file
+    columns need shifting; only the data-parquet locations are refreshed.
+    """
     import pandas as pd
 
-    n_src_episodes = len(orig_ep_meta)
     new_rows = []
-
-    # ---- Originals ----
     for _, orig_row in orig_ep_meta.iterrows():
         row = orig_row.copy()
         ep_id = int(orig_row["episode_index"])
@@ -156,35 +189,43 @@ def build_episodes_meta(
             row["data/file_index"] = file_idx
         new_rows.append(row)
 
-    # ---- Augmented copies (same per-episode video position, shifted file_index) ----
-    for _, orig_row in orig_ep_meta.iterrows():
-        row = orig_row.copy()
-        src_ep_id = int(orig_row["episode_index"])
-        new_ep_id = src_ep_id + n_src_episodes
-        row["episode_index"] = new_ep_id
-
-        ep_data = out_df[out_df["episode_index"] == new_ep_id]
-        if "dataset_from_index" in row.index:
-            row["dataset_from_index"] = int(ep_data["index"].iloc[0])
-            row["dataset_to_index"] = int(ep_data["index"].iloc[-1]) + 1
-        chunk_idx, file_idx = ep_data_loc[new_ep_id]
-        if "data/chunk_index" in row.index:
-            row["data/chunk_index"] = chunk_idx
-        if "data/file_index" in row.index:
-            row["data/file_index"] = file_idx
-
-        for vk in video_keys:
-            fcol = f"videos/{vk}/file_index"
-            if fcol in row.index:
-                row[fcol] = int(orig_row[fcol]) + src_video_file_counts[vk]
-
-        new_rows.append(row)
-
     new_meta = pd.DataFrame(new_rows).reset_index(drop=True)
     out_path = out_dir / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pandas(new_meta, preserve_index=False), out_path)
     return new_meta
+
+
+def write_readme(out_dir: Path, repo_id: str | None = None):
+    """Write a minimal LeRobot dataset card.
+
+    Only the YAML front-matter matters for the Hugging Face dataset page to embed
+    the LeRobot visualizer: the ``LeRobot`` tag (capital L and R) is what makes HF
+    recognise it as a LeRobot dataset, and the ``configs`` block points the viewer
+    at the parquet files. This matches the card LeRobot itself generates.
+    """
+    frontmatter = (
+        "---\n"
+        "license: apache-2.0\n"
+        "task_categories:\n"
+        "  - robotics\n"
+        "tags:\n"
+        "  - LeRobot\n"
+        "configs:\n"
+        "  - config_name: default\n"
+        "    data_files: data/*/*.parquet\n"
+        "---\n"
+    )
+
+    body = "\nThis dataset was created using [LeRobot](https://github.com/huggingface/lerobot).\n"
+    if repo_id:
+        body += (
+            f'\n<a href="https://huggingface.co/spaces/lerobot/visualize_dataset?path={repo_id}">\n'
+            '  <img src="https://huggingface.co/datasets/huggingface/badges/resolve/main/visualize-this-dataset-xl.svg"/>\n'
+            "</a>\n"
+        )
+
+    (out_dir / "README.md").write_text(frontmatter + body)
 
 
 def main():
@@ -194,8 +235,12 @@ def main():
     parser.add_argument(
         "--brightness-levels", type=float, nargs="+",
         default=[0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2],
-        help="List of brightness multipliers. Source episodes are split into "
-             "len(levels) contiguous partitions; each partition gets one level.",
+        help="List of brightness multipliers. Each source episode is assigned "
+             "one level chosen uniformly at random.",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42,
+        help="Random seed for the per-episode brightness assignment (reproducible).",
     )
     parser.add_argument("--token", default=None, help="HF token (or set HF_TOKEN env var)")
     parser.add_argument("--private", action="store_true", help="Create destination repo as private")
@@ -245,6 +290,7 @@ def main():
     orig_ep_meta = pq.read_table(
         local_dir / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
     ).to_pandas()
+    orig_ep_meta = dedup_episodes_meta(orig_ep_meta, src_df)
 
     src_video_file_counts: dict[str, int] = {}
     for vk in video_keys:
@@ -255,16 +301,16 @@ def main():
             src_video_file_counts[vk] = 1
     print(f"  source video files per key: {src_video_file_counts}")
 
-    # ---- Assign brightness per source episode ----
+    # ---- Assign a random brightness level to each source episode ----
+    rng = random.Random(args.seed)
     ep_brightness: dict[int, float] = {}
-    partition_counts = [0] * n_levels
+    level_counts = {lvl: 0 for lvl in levels}
     for ep_id in range(n_src_episodes):
-        p = episode_partition(ep_id, n_src_episodes, n_levels)
-        ep_brightness[ep_id] = levels[p]
-        partition_counts[p] += 1
-    print("  partition sizes: " + ", ".join(
-        f"b={levels[p]:.2f}:{partition_counts[p]}" for p in range(n_levels)
-    ))
+        lvl = rng.choice(levels)
+        ep_brightness[ep_id] = lvl
+        level_counts[lvl] += 1
+    print(f"  random brightness assignment (seed={args.seed}); level counts: "
+          + ", ".join(f"b={lvl:.2f}:{level_counts[lvl]}" for lvl in levels))
 
     # ------------------------------------------------------------------ #
     # 3. Build output data parquets and episode metadata
@@ -278,13 +324,21 @@ def main():
 
     new_ep_meta = build_episodes_meta(
         orig_ep_meta,
-        video_keys=video_keys,
-        src_video_file_counts=src_video_file_counts,
         out_df=out_df,
         ep_data_loc=ep_data_loc,
         out_dir=work_dir,
     )
     print(f"  wrote episodes meta: {len(new_ep_meta)} episodes")
+
+    # ---- Verify in place: episode count must be unchanged ----
+    n_out_episodes = len(new_ep_meta)
+    if n_out_episodes != n_src_episodes:
+        raise RuntimeError(
+            f"Episode count changed during augmentation: "
+            f"{n_src_episodes} (source) -> {n_out_episodes} (output). "
+            f"Augmentation must be in place."
+        )
+    print(f"  verified episode count unchanged: {n_src_episodes} == {n_out_episodes}")
 
     # ------------------------------------------------------------------ #
     # 4. For each source video file: copy original, re-encode augmented
@@ -309,13 +363,7 @@ def main():
                 )
             )
 
-            # Copy original to the corresponding output slot
-            out_orig = work_dir / "videos" / vk / "chunk-000" / f"file-{f:03d}.mp4"
-            out_orig.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src_video, out_orig)
-            print(f"    copied original  videos/{vk}/chunk-000/file-{f:03d}.mp4")
-
-            # Build frame-index -> brightness map for the augmented copy of this file
+            # Build frame-index -> brightness map for this file's episodes
             file_eps = orig_ep_meta[
                 (orig_ep_meta[chunk_col] == 0) & (orig_ep_meta[file_col] == f)
             ] if chunk_col in orig_ep_meta.columns else orig_ep_meta
@@ -332,9 +380,9 @@ def main():
                     frame_brightness[fi] = b
                 covered.append((ep_id, b, start, end))
 
-            new_file_idx = n_files + f
-            out_aug = work_dir / "videos" / vk / "chunk-000" / f"file-{new_file_idx:03d}.mp4"
-            print(f"    encoding augmented copy -> file-{new_file_idx:03d}.mp4 "
+            # Re-encode in place: same file index, brightness applied to pixels
+            out_aug = work_dir / "videos" / vk / "chunk-000" / f"file-{f:03d}.mp4"
+            print(f"    re-encoding in place -> file-{f:03d}.mp4 "
                   f"({len(covered)} episodes, brightness range "
                   f"{min(b for _, b, _, _ in covered):.2f}..{max(b for _, b, _, _ in covered):.2f})")
             n_written = reencode_per_frame_brightness(src_video, out_aug, frame_brightness, fps)
@@ -346,20 +394,24 @@ def main():
     print("\n[5/5] Finalizing and pushing...")
 
     new_info = dict(info)
-    new_info["total_episodes"] = n_src_episodes * 2
-    new_info["total_frames"] = n_src_frames * 2
-    if "total_videos" in info:
-        new_info["total_videos"] = info["total_videos"] * 2
+    # In-place augmentation: episode/frame/video counts are unchanged.
+    new_info["total_episodes"] = n_src_episodes
+    new_info["total_frames"] = n_src_frames
     new_info["augmentation"] = (
-        f"Brightness-augmented from {args.src}: source episodes split into "
-        f"{n_levels} partitions, brightness levels {levels}. Output = original + "
-        f"one augmented copy per source episode (2x source size)."
+        f"Brightness-augmented in place from {args.src}: each episode assigned a "
+        f"random brightness level from {levels} (seed={args.seed}). Each episode's "
+        f"video is re-encoded at its brightness; episode count unchanged "
+        f"({n_src_episodes})."
     )
     (work_dir / "meta").mkdir(parents=True, exist_ok=True)
     with open(work_dir / "meta" / "info.json", "w") as f:
         json.dump(new_info, f, indent=2)
 
     shutil.copy(local_dir / "meta" / "tasks.parquet", work_dir / "meta" / "tasks.parquet")
+
+    # README.md — the `LeRobot` tag is what makes the HF dataset page embed the
+    # visualizer; without a card the augmented dataset cannot be visualized.
+    write_readme(work_dir, repo_id=args.dst)
 
     try:
         api.repo_info(repo_id=args.dst, repo_type="dataset")
@@ -373,14 +425,14 @@ def main():
         repo_id=args.dst,
         repo_type="dataset",
         commit_message=(
-            f"Add 1 brightness-augmented copy per episode "
-            f"(partition-assigned over levels {levels})"
+            f"Brightness-augment episodes in place "
+            f"(random levels {levels}, seed={args.seed})"
         ),
     )
 
     print(f"\nDone. Dataset pushed to https://huggingface.co/datasets/{args.dst}")
-    print(f"  Episodes: {n_src_episodes} -> {new_info['total_episodes']}")
-    print(f"  Frames:   {n_src_frames} -> {new_info['total_frames']}")
+    print(f"  Episodes: {n_src_episodes} (unchanged)")
+    print(f"  Frames:   {n_src_frames} (unchanged)")
 
     shutil.rmtree(work_dir)
 

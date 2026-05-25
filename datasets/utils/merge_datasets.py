@@ -107,6 +107,8 @@ def _load_tasks(src: Path) -> List[str]:
     if pd.api.types.is_string_dtype(df.index):
         return list(df.index)
     if "task" in df.columns and pd.api.types.is_string_dtype(df["task"]):
+        if "task_index" in df.columns:
+            df = df.sort_values("task_index")
         return list(df["task"])
     df2 = df.reset_index()
     for col in df2.columns:
@@ -260,10 +262,48 @@ def _update_episode_row(
 
 
 # ---------------------------------------------------------------------------
+# README
+# ---------------------------------------------------------------------------
+
+def _write_readme(dst: Path, repo_id: Optional[str] = None) -> None:
+    """Write a minimal LeRobot dataset card.
+
+    Only the YAML front-matter matters for the Hugging Face dataset page to embed
+    the LeRobot visualizer: the ``LeRobot`` tag (capital L and R) is what makes HF
+    recognise it as a LeRobot dataset, and the ``configs`` block points the viewer
+    at the parquet files. This matches the card LeRobot itself generates in
+    ``create_lerobot_dataset_card`` — anything else is intentionally left out.
+    """
+    frontmatter = (
+        "---\n"
+        "license: apache-2.0\n"
+        "task_categories:\n"
+        "  - robotics\n"
+        "tags:\n"
+        "  - LeRobot\n"
+        "configs:\n"
+        "  - config_name: default\n"
+        "    data_files: data/*/*.parquet\n"
+        "---\n"
+    )
+
+    body = "\nThis dataset was created using [LeRobot](https://github.com/huggingface/lerobot).\n"
+    if repo_id:
+        body += (
+            f'\n<a href="https://huggingface.co/spaces/lerobot/visualize_dataset?path={repo_id}">\n'
+            '  <img src="https://huggingface.co/datasets/huggingface/badges/resolve/main/visualize-this-dataset-xl.svg"/>\n'
+            "</a>\n"
+        )
+
+    with open(dst / "README.md", "w") as f:
+        f.write(frontmatter + body)
+
+
+# ---------------------------------------------------------------------------
 # Core merge
 # ---------------------------------------------------------------------------
 
-def merge(sources: List[Path], dst: Path) -> None:
+def merge(sources: List[Path], dst: Path, repo_id: Optional[str] = None) -> None:
     ref_info = validate_uniform(sources)
     vkeys    = _video_keys(ref_info)
     global_tasks, task_remaps = _build_global_tasks(sources)
@@ -361,16 +401,57 @@ def merge(sources: List[Path], dst: Path) -> None:
     ep_df = (pd.DataFrame(all_ep_rows)
                .sort_values("episode_index")
                .reset_index(drop=True))
+
+    # Normalize stats columns so pyarrow sees a uniform type per column.
+    # Mixed numpy arrays and scalars (or arrays of different dtypes) cause ArrowInvalid.
+    def _normalize_stat_val(v):
+        if isinstance(v, np.ndarray):
+            return v.tolist()
+        if isinstance(v, list):
+            return v
+        if v is None:
+            return None
+        try:
+            if np.isnan(float(v)):
+                return None
+        except (TypeError, ValueError):
+            pass
+        return [float(v)]
+
+    for col in ep_df.columns:
+        if not col.startswith("stats/"):
+            continue
+        col_vals = ep_df[col]
+        # Check if any value is array-like
+        has_array = col_vals.apply(
+            lambda v: isinstance(v, (np.ndarray, list))
+        ).any()
+        if has_array:
+            ep_df[col] = col_vals.apply(_normalize_stat_val)
+        else:
+            # All scalars — convert to float for consistency
+            ep_df[col] = pd.to_numeric(col_vals, errors="coerce")
+
     out_ep = dst / "meta/episodes/chunk-000/file-000.parquet"
     out_ep.parent.mkdir(parents=True, exist_ok=True)
-    ep_df.to_parquet(out_ep, index=False)
+    # Write via pyarrow directly so we infer a fresh schema without stale pandas
+    # metadata (which can encode fixed_size_list types that conflict with our lists).
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    arrays, fields = [], []
+    for col in ep_df.columns:
+        arr = pa.array(ep_df[col].tolist())
+        arrays.append(arr)
+        fields.append(pa.field(col, arr.type))
+    table = pa.table(dict(zip(ep_df.columns, arrays)), schema=pa.schema(fields))
+    pq.write_table(table, out_ep)
 
     # ---- merged tasks.parquet ---------------------------------------------
-    tasks_df = pd.DataFrame(
-        {"task_index": list(range(len(global_tasks)))},
-        index=pd.Index(global_tasks),
-    )
-    tasks_df.to_parquet(dst / "meta" / "tasks.parquet")
+    tasks_df = pd.DataFrame({
+        "task_index": list(range(len(global_tasks))),
+        "task": global_tasks,
+    })
+    tasks_df.to_parquet(dst / "meta" / "tasks.parquet", index=False)
 
     # ---- info.json --------------------------------------------------------
     new_info = dict(ref_info)
@@ -382,6 +463,9 @@ def merge(sources: List[Path], dst: Path) -> None:
     new_info["splits"]         = {"train": f"0:{ep_offset}"}
     with open(dst / "meta" / "info.json", "w") as f:
         json.dump(new_info, f, indent=2)
+
+    # ---- README.md --------------------------------------------------------
+    _write_readme(dst, repo_id)
 
     print(
         f"\nMerged {len(sources)} datasets → "
@@ -446,7 +530,7 @@ def main() -> None:
             sys.exit(f"Error: destination already exists: {dst}")
 
     try:
-        merge(local_sources, dst)
+        merge(local_sources, dst, hf_output_repo)
         if output_is_hf:
             _push_to_hub(dst, hf_output_repo)
         else:
