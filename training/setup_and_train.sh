@@ -12,6 +12,7 @@ set -euo pipefail
 
 # ── CONFIG — set these with environment variables before running ──────────────
 HF_TOKEN="${HF_TOKEN:-}"
+POLICY_PATH="${POLICY_PATH:-lerobot/smolvla_base}"
 DATASET_REPO_ID="${DATASET_REPO_ID:-ETHrobotlearning/tv-colors-task2}"
 OUTPUT_REPO_ID="${OUTPUT_REPO_ID:-ETHrobotlearning/smolvla_eval2_topview_chunk10_30k}"
 TRAIN_STEPS="${TRAIN_STEPS:-30000}"
@@ -98,6 +99,7 @@ echo ""
 echo "============================================================"
 echo " SmolVLA Fine-Tuning Pipeline"
 echo "============================================================"
+echo " Policy  : $POLICY_PATH"
 echo " Dataset : $DATASET_REPO_ID"
 echo " Output base : $OUTPUT_REPO_ID"
 echo " Steps   : $TRAIN_STEPS  |  Batch: $BATCH_SIZE  |  WandB: $WANDB_ENABLE"
@@ -329,7 +331,7 @@ cd "$LEROBOT_DIR"
 echo "==> Launch mode: single GPU"
 HF_TOKEN="$HF_TOKEN" "$ENV_BIN/lerobot-train" \
   --policy.type=smolvla \
-  --policy.pretrained_path=lerobot/smolvla_base \
+  --policy.pretrained_path="$POLICY_PATH" \
   --policy.freeze_vision_encoder=true \
   --policy.train_expert_only=true \
   --dataset.repo_id="$DATASET_REPO_ID" \

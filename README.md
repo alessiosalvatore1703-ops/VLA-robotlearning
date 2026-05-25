@@ -20,6 +20,7 @@ datasets/
     color_prompts_to_negation.py Convert color bowl prompts to negation prompts
     relabel_relative_bowls_and_merge.py Convert ordinal bowl prompts to relative left/right prompts
     merge_datasets.py          Merge multiple datasets into one
+    trim_lerobot_episodes.py   Manually trim episode start/end frames
 lerobot-doctor/       Dataset quality diagnostics tool (vendored)
 tracelr/              Desktop episode viewer and annotation tool (own README)
 training/
@@ -113,6 +114,25 @@ python datasets/utils/merge_datasets.py \
 ```
 
 Requires datasets to pass the uniformity check (fps, features, codec). Tasks do not need to match — each source's prompts are merged into a unified task list and `task_index` values are remapped automatically.
+
+### trim_lerobot_episodes.py — manually trim episode ranges
+
+```bash
+python datasets/utils/trim_lerobot_episodes.py \
+    --input  user/my_dataset \
+    --output outputs/datasets/my_dataset_trimmed \
+    --interactive
+```
+
+Prompts episode by episode for `start end` frame ranges after showing the source video path. Frame numbers are episode-local and `end` is inclusive. Decisions are saved to `manual_trim_ranges.json`, so you can rerun non-interactively or push:
+
+```bash
+python datasets/utils/trim_lerobot_episodes.py \
+    --input user/my_dataset \
+    --output user/my_dataset_trimmed \
+    --trim-file manual_trim_ranges.json \
+    --push-to-hub
+```
 
 ### relabel_bowls_and_merge.py — convert bowl positions to colors and merge
 

@@ -236,6 +236,11 @@ def parse_args() -> argparse.Namespace:
         help="HF Hub model repo where the checkpoint will be pushed (e.g. username/my-smolvla).",
     )
     p.add_argument(
+        "--policy-path",
+        default="lerobot/smolvla_base",
+        help="HF Hub LeRobot/SmolVLA policy checkpoint to initialize from.",
+    )
+    p.add_argument(
         "--hf-token",
         default=os.environ.get("HF_TOKEN"),
         help="Hugging Face access token. Defaults to $HF_TOKEN.",
@@ -333,6 +338,7 @@ def main() -> None:
     # values (HF tokens, wandb keys, repo ids) can contain a literal ' char.
     cred_lines = [
         f"export HF_TOKEN='{args.hf_token}'",
+        f"export POLICY_PATH='{args.policy_path}'",
         f"export DATASET_REPO_ID='{args.dataset_repo_id}'",
         f"export OUTPUT_REPO_ID='{args.output_repo_id}'",
         f"export TRAIN_STEPS='{args.train_steps}'",
