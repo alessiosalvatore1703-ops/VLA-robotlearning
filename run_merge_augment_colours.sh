@@ -5,7 +5,7 @@
 #   1. relabel_bowls_and_merge.py  : merge the 6 original configs + rewrite ordinal
 #                                    bowl prompts to colour prompts
 #                                    -> ETHrobotlearning/colours-task2-premerge  (tmp)
-#   2. augment_brightness_push.py  : brightness-augment the merged dataset
+#   2. augmentation/augment_brightness_push.py : brightness-augment the merged dataset
 #                                    -> ETHrobotlearning/colours-task2  (final)
 #   3. Delete the temporary intermediate repo from the Hub.
 #
@@ -69,7 +69,7 @@ echo "  levels  : $BRIGHTNESS_LEVELS"
 echo "============================================================"
 
 # shellcheck disable=SC2086
-python augment_brightness_push.py \
+python augmentation/augment_brightness_push.py \
     --src  "$TMP_REPO" \
     --dst  "$FINAL_REPO" \
     --brightness-levels $BRIGHTNESS_LEVELS

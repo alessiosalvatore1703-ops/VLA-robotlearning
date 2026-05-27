@@ -35,7 +35,7 @@ FINAL_REPO = "ETHrobotlearning/colours-task2"
 
 BRIGHTNESS_LEVELS = [0.5, 0.6, 0.7, 0.8, 0.9, 1.3, 1.1, 1.2]
 
-UTILS_DIR = Path(__file__).parent / "datasets" / "utils"
+UTILS_DIR = Path(__file__).parent.parent / "datasets" / "utils"
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
